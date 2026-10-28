@@ -33,7 +33,7 @@ export interface ExtensionCommands {
 
 export interface ExtensionRuntime {
   getURL?(path: string): string;
-  onMessage?: { addListener(listener: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void): void };
+  onMessage?: { addListener(listener: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void): void };
 }
 
 export interface WebExtensionApi {

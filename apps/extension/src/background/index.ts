@@ -68,6 +68,7 @@ export function startBackground(api = resolveExtensionApi()): void {
       updateExisting: async () => { if (result.kind === 'existing') await service.save({ url: result.existing.url, title: result.existing.title }, 'update'); },
       copyExisting: async () => { if (result.kind === 'existing') await service.save({ url: result.existing.url, title: result.existing.title }, 'copy'); },
     });
+    return result;
   };
   const loadSyncConfig = async () => {
     syncConfig = await repository.getSyncConfig();
@@ -88,30 +89,30 @@ export function startBackground(api = resolveExtensionApi()): void {
     }, 5 * 60 * 1000);
   };
   void loadSyncConfig().then(scheduleAutoSync);
-  registerSaveEntrypoints(api, save);
+  registerSaveEntrypoints(api, async () => { await save(); });
   api.runtime?.onMessage?.addListener((message: unknown, _sender: unknown, sendResponse) => {
     const type = typeof message === 'object' && message !== null && 'type' in message
       ? (message as { type?: string }).type : undefined;
-    if (type === 'lumamark-save') { void save(); sendResponse({ ok: true }); return; }
-    if (type === 'lumamark-open-library') { void openLibrary(); sendResponse({ ok: true }); return; }
-    if (type === 'lumamark-undo') { void lastUndo(); sendResponse({ ok: true }); return; }
+    if (type === 'lumamark-save') { void save().then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
+    if (type === 'lumamark-open-library') { void openLibrary().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
+    if (type === 'lumamark-undo') { void lastUndo().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
     if (type === 'lumamark-list') {
       const payload = (message as { payload?: { text?: string; includeDeleted?: boolean } }).payload;
       void repository.list({ includeDeleted: payload?.includeDeleted ?? false, text: payload?.text }).then((items) => sendResponse({ ok: true, items }));
-      return;
+      return true;
     }
     const payload = (message as { payload?: any }).payload ?? {};
-    if (type === 'lumamark-list-collections') { void repository.listCollections().then((items) => sendResponse({ ok: true, items })); return; }
+    if (type === 'lumamark-list-collections') { void repository.listCollections().then((items) => sendResponse({ ok: true, items })); return true; }
     if (type === 'lumamark-favorite') {
       void (async () => {
         const current = await repository.findById(payload.id);
         if (!current) throw new Error('Bookmark not found');
         return service.update(payload.id, { favorite: payload.favorite ?? !current.favorite });
-      })().then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return;
+      })().then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
     }
     if (type === 'lumamark-update') {
       const ids = Array.isArray(payload.ids) ? payload.ids : [payload.id];
-      void Promise.all(ids.filter(Boolean).map((id: string) => service.update(id, payload.update ?? {}))).then((items) => sendResponse({ ok: true, items })).catch((error) => sendResponse({ ok: false, error: String(error) })); return;
+      void Promise.all(ids.filter(Boolean).map((id: string) => service.update(id, payload.update ?? {}))).then((items) => sendResponse({ ok: true, items })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
     }
     if (type === 'lumamark-delete') {
       const ids = Array.isArray(payload.ids) ? payload.ids : [payload.id];
@@ -120,12 +121,12 @@ export function startBackground(api = resolveExtensionApi()): void {
         removed = items.map((item) => item.id);
         lastUndo = async () => { for (const id of removed) await service.restore(id); };
         sendResponse({ ok: true, items });
-      }).catch((error) => sendResponse({ ok: false, error: String(error) })); return;
+      }).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
     }
-    if (type === 'lumamark-restore') { void service.restore(payload.id).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return; }
+    if (type === 'lumamark-restore') { void service.restore(payload.id).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
     if (type === 'lumamark-sync-configure') {
       syncConfig = { key: 'sync-config', url: String(payload.url ?? ''), path: String(payload.path ?? 'lumamark.json'), username: payload.username ? String(payload.username) : undefined, password: payload.password ? String(payload.password) : undefined, autoSync: Boolean(payload.autoSync) };
-      void repository.setSyncConfig(syncConfig).then(() => repository.getSyncMetadata()).then((metadata) => repository.setSyncMetadata({ ...metadata, autoSync: syncConfig!.autoSync, status: 'idle', error: undefined })).then(() => { scheduleAutoSync(); sendResponse({ ok: true }); }); return;
+      void repository.setSyncConfig(syncConfig).then(() => repository.getSyncMetadata()).then((metadata) => repository.setSyncMetadata({ ...metadata, autoSync: syncConfig!.autoSync, status: 'idle', error: undefined })).then(() => { scheduleAutoSync(); sendResponse({ ok: true }); }).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
     }
     if (type === 'lumamark-sync') {
       void (async () => {
@@ -139,10 +140,10 @@ export function startBackground(api = resolveExtensionApi()): void {
           await repository.setSyncMetadata({ ...metadata, autoSync: false });
         }
         sendResponse(result);
-      })(); return;
+      })(); return true;
     }
     if (type === 'lumamark-export') {
-      void Promise.all([repository.list({ includeDeleted: true }), repository.listCollections()]).then(([bookmarks, collections]) => sendResponse({ ok: true, content: exportLumaMarkJson(bookmarks, collections) })); return;
+      void Promise.all([repository.list({ includeDeleted: true }), repository.listCollections()]).then(([bookmarks, collections]) => sendResponse({ ok: true, content: exportLumaMarkJson(bookmarks, collections) })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
     }
     if (type === 'lumamark-import') {
       void (async () => {
@@ -153,7 +154,7 @@ export function startBackground(api = resolveExtensionApi()): void {
         await applyImportPlan(plan, service, repository);
         for (const collection of parsed.collections as Collection[]) await repository.putCollection(collection);
         sendResponse({ ok: true, issues: plan.issues, imported: plan.entries.length, duplicateAction: action, choices: plan.issues.filter((issue) => issue.kind === 'duplicate').length });
-      })().catch((error) => sendResponse({ ok: false, error: String(error) })); return;
+      })().catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
     }
   });
 }

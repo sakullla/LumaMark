@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
+import 'fake-indexeddb/auto';
 import { captureActivePage, notifySaveResult, resolveExtensionApi, saveActionsForResult, saveActivePage } from '../../packages/browser/src/index';
 import { readPageMetadata } from '../../apps/extension/src/content/index';
 import { BookmarkService, makeBookmark } from '../../packages/domain/src/index';
 import { planImport } from '../../packages/import-export/src/index';
-import { applyImportPlan } from '../../apps/extension/src/background/index';
+import { applyImportPlan, startBackground } from '../../apps/extension/src/background/index';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 
@@ -58,6 +59,7 @@ describe('browser adapter', () => {
         expect(existsSync(`dist/extension/${target}/${file}`)).toBe(true);
       }
       expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('lumamark-save-page');
+      expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('return true');
       expect(readFileSync(`dist/extension/${target}/content.js`, 'utf8')).toContain('lumamark-page-metadata');
       const popup = readFileSync(`dist/extension/${target}/popup.js`, 'utf8');
       const library = readFileSync(`dist/extension/${target}/library.js`, 'utf8');
@@ -72,6 +74,21 @@ describe('browser adapter', () => {
       expect(settings).toContain('lumamark-export');
       expect(settings).not.toContain('Sync requested. Configure WebDAV in the host app.');
     }
+  });
+
+  it('keeps asynchronous background responses open for runtime messages', async () => {
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    const api = {
+      tabs: { query: vi.fn().mockResolvedValue([]), create: vi.fn().mockResolvedValue(undefined) },
+      runtime: { onMessage: { addListener: (callback: typeof listener extends infer T ? T : never) => { listener = callback; } } },
+    };
+    startBackground(api);
+
+    expect(listener).toBeDefined();
+    let response: unknown;
+    const keepChannelOpen = listener?.({ type: 'lumamark-list' }, {}, (value) => { response = value; });
+    expect(keepChannelOpen).toBe(true);
+    await vi.waitFor(() => expect(response).toEqual({ ok: true, items: [] }));
   });
 
   it('updates an existing import in place instead of creating a duplicate', async () => {
