@@ -31,14 +31,25 @@ class MemoryRepository implements SyncRepository {
   async putCollection(value: Collection): Promise<void> { this.collections.set(value.id, value); }
   async getSyncMetadata(): Promise<SyncMetadata> { return this.metadata; }
   async setSyncMetadata(value: SyncMetadata): Promise<void> { this.metadata = value; }
-  async putConflict(value: any): Promise<void> { this.conflicts.push(value); }
-  async listConflicts(): Promise<any[]> { return this.conflicts; }
+  async putConflict(value: any): Promise<void> {
+    const index = this.conflicts.findIndex((item) => item.id === value.id);
+    if (index >= 0) this.conflicts[index] = value;
+    else this.conflicts.push(value);
+  }
+  async listConflicts(includeResolved = false): Promise<any[]> {
+    return includeResolved ? [...this.conflicts] : this.conflicts.filter((item) => !item.resolvedAt);
+  }
 }
 
 class MemoryClient implements WebDavClient {
   public snapshot: { manifest?: SyncManifest; etag?: string } = {};
   public fail = false;
-  async read() { if (this.fail) throw new Error('network unavailable'); return this.snapshot; }
+  public notFound = false;
+  async read() {
+    if (this.fail) throw new Error('network unavailable');
+    if (this.notFound) throw Object.assign(new Error('not found'), { status: 404 });
+    return this.snapshot;
+  }
   async write(manifest: SyncManifest, etag?: string) { if (this.fail) throw new Error('remote is read-only'); this.snapshot = { manifest, etag: etag ?? 'etag-1' }; return { etag: 'etag-2' }; }
 }
 
@@ -90,6 +101,44 @@ describe('WebDavSyncEngine', () => {
     expect(result.status).toBe('conflict');
     expect(result.conflicts[0].bookmarkId).toBe('same');
     expect(repository.metadata.status).toBe('conflict');
+  });
+
+  it('keeps one unresolved conflict visible and resolves the remote choice', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    const local = bookmark('same', 'Local', 2, '2024-01-02T00:00:00.000Z');
+    const remote = bookmark('same', 'Remote', 2, '2024-01-03T00:00:00.000Z');
+    await repository.put(local);
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync', schemaVersion: 1, generatedAt: '2024-01-02T00:00:00.000Z', deviceId: 'device-b',
+      bookmarks: [remote], collections: [],
+    };
+    const engine = new WebDavSyncEngine(repository, client);
+    const first = await engine.sync();
+    expect(first.status).toBe('conflict');
+    expect(repository.conflicts).toHaveLength(1);
+    await engine.sync();
+    expect(repository.conflicts).toHaveLength(1);
+
+    const resolved = await engine.resolveConflict(repository.conflicts[0].id, 'remote');
+    expect(resolved.resolution).toBe('remote');
+    expect(resolved.resolvedAt).toBeTruthy();
+    expect((await repository.findById('same'))?.title).toBe('Remote');
+    expect((await repository.listConflicts()).find((item) => item.id === resolved.id)).toBeUndefined();
+    expect(repository.metadata.status).toBe('idle');
+    expect(repository.metadata.pendingChanges).toBe(0);
+  });
+
+  it('initializes a missing remote manifest on the first sync', async () => {
+    const repository = new MemoryRepository();
+    await repository.put(bookmark('local', 'Local'));
+    const client = new MemoryClient();
+    client.notFound = true;
+    const result = await new WebDavSyncEngine(repository, client).sync();
+    expect(result.status).toBe('idle');
+    expect(client.snapshot.manifest?.format).toBe('lumamark-sync');
+    expect(client.snapshot.manifest?.bookmarks.map((item) => item.id)).toEqual(['local']);
   });
 
   it('converges edited and deleted collections by newer revision', async () => {

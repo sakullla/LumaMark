@@ -43,6 +43,8 @@ export interface SyncResult {
   lastSyncAt?: string;
 }
 
+export type ConflictResolution = 'local' | 'remote' | 'merged';
+
 function equalBookmark(left: Bookmark, right: Bookmark): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -79,6 +81,25 @@ export class WebDavSyncEngine {
     private readonly client: WebDavClient,
   ) {}
 
+  /** Resolve one persisted conflict and leave the next sync to publish the choice. */
+  async resolveConflict(conflictId: string, resolution: ConflictResolution, merged?: Bookmark): Promise<ConflictRecord> {
+    const conflict = (await this.repository.listConflicts()).find((item) => item.id === conflictId);
+    if (!conflict) throw new Error('Conflict not found');
+    const selected = resolution === 'local' ? conflict.local : resolution === 'remote' ? conflict.remote : merged;
+    if (!selected || selected.id !== conflict.bookmarkId) throw new Error('Merged bookmark is required for this conflict');
+    await this.repository.put(selected);
+    const resolved: ConflictRecord = { ...conflict, resolvedAt: new Date().toISOString(), resolution };
+    await this.repository.putConflict(resolved);
+    const metadata = await this.repository.getSyncMetadata();
+    await this.repository.setSyncMetadata({
+      ...metadata,
+      status: 'idle',
+      pendingChanges: Math.max(0, metadata.pendingChanges - 1),
+      error: undefined,
+    });
+    return resolved;
+  }
+
   async sync(): Promise<SyncResult> {
     const before = await this.repository.getSyncMetadata();
     const syncing: SyncMetadata = { ...before, status: 'syncing', error: undefined };
@@ -86,13 +107,22 @@ export class WebDavSyncEngine {
     try {
       const local = await this.repository.list({ includeDeleted: true });
       const localCollections = await this.repository.listCollections();
-      const remoteSnapshot = await this.client.read();
+      let remoteSnapshot: RemoteSnapshot;
+      try {
+        remoteSnapshot = await this.client.read();
+      } catch (error) {
+        // A missing WebDAV resource is the normal first-sync state. Treat it
+        // as an empty remote manifest so local data can initialize the file.
+        if ((error as { status?: number }).status !== 404) throw error;
+        remoteSnapshot = {};
+      }
       const remote = remoteSnapshot.manifest?.bookmarks ?? [];
       const remoteCollections = remoteSnapshot.manifest?.collections ?? [];
       const byId = new Map(local.map((item) => [item.id, item]));
       const remoteById = new Map(remote.map((item) => [item.id, item]));
       const merged = new Map<string, Bookmark>();
       const conflicts: ConflictRecord[] = [];
+      const unresolvedByBookmark = new Map((await this.repository.listConflicts()).map((item) => [item.bookmarkId, item]));
       const ids = new Set([...byId.keys(), ...remoteById.keys()]);
       const mergedCollections = new Map<string, Collection>(localCollections.map((item) => [item.id, item]));
       for (const collection of remoteCollections) {
@@ -135,6 +165,12 @@ export class WebDavSyncEngine {
         const localChanged = changedSince(localItem, before.lastSyncAt);
         const remoteChanged = changedSince(remoteItem, before.lastSyncAt);
         if (localChanged && remoteChanged) {
+          const existingConflict = unresolvedByBookmark.get(id);
+          if (existingConflict) {
+            conflicts.push(existingConflict);
+            merged.set(id, localItem);
+            continue;
+          }
           const conflict: ConflictRecord = {
             id: crypto.randomUUID(),
             bookmarkId: id,
