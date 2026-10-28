@@ -92,14 +92,15 @@ export class WebDavSyncEngine {
     const syncBaseline = [resolvedAt, conflict.local.updatedAt, conflict.remote.updatedAt, selected.updatedAt].sort().at(-1)!;
     const resolved: ConflictRecord = { ...conflict, resolvedAt, resolution };
     await this.repository.putConflict(resolved);
+    const remainingConflicts = await this.repository.listConflicts();
     const metadata = await this.repository.getSyncMetadata();
     await this.repository.setSyncMetadata({
       ...metadata,
-      status: 'idle',
+      status: remainingConflicts.length ? 'conflict' : 'idle',
       // Establish a new sync baseline so the selected version is not
       // considered a second simultaneous edit on the next sync.
       lastSyncAt: syncBaseline,
-      pendingChanges: Math.max(0, metadata.pendingChanges - 1),
+      pendingChanges: remainingConflicts.length,
       error: undefined,
     });
     return resolved;

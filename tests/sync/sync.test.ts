@@ -148,6 +148,27 @@ describe('WebDavSyncEngine', () => {
     expect(client.snapshot.manifest?.bookmarks[0].title).toBe('Local');
   });
 
+  it('keeps conflict status while other conflicts remain unresolved', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put(bookmark('one', 'Local one', 2, '2024-01-02T00:00:00.000Z'));
+    await repository.put(bookmark('two', 'Local two', 2, '2024-01-02T00:00:00.000Z'));
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync', schemaVersion: 1, generatedAt: '2024-01-02T00:00:00.000Z', deviceId: 'device-b',
+      bookmarks: [bookmark('one', 'Remote one', 2, '2024-01-03T00:00:00.000Z'), bookmark('two', 'Remote two', 2, '2024-01-03T00:00:00.000Z')],
+      collections: [],
+    };
+    const engine = new WebDavSyncEngine(repository, client);
+    const result = await engine.sync();
+    expect(result.status).toBe('conflict');
+    expect(repository.metadata.pendingChanges).toBe(2);
+    await engine.resolveConflict(repository.conflicts[0].id, 'local');
+    expect(repository.metadata.status).toBe('conflict');
+    expect(repository.metadata.pendingChanges).toBe(1);
+    expect((await repository.listConflicts()).length).toBe(1);
+  });
+
   it('initializes a missing remote manifest on the first sync', async () => {
     const repository = new MemoryRepository();
     await repository.put(bookmark('local', 'Local'));
