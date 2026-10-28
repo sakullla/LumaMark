@@ -43,8 +43,8 @@ class MemoryClient implements WebDavClient {
 }
 
 describe('WebDavSyncEngine', () => {
-  const collection = (id: string, name: string): Collection => ({
-    id, name, position: 0, createdAt: '2024-01-01T00:00:00.000Z', updatedAt: '2024-01-01T00:00:00.000Z', revision: 1,
+  const collection = (id: string, name: string, revision = 1, updatedAt = '2024-01-01T00:00:00.000Z', deletedAt?: string): Collection => ({
+    id, name, position: 0, createdAt: '2024-01-01T00:00:00.000Z', updatedAt, revision, ...(deletedAt ? { deletedAt } : {}),
   });
 
   it('uploads local changes and imports remote-only records', async () => {
@@ -90,6 +90,30 @@ describe('WebDavSyncEngine', () => {
     expect(result.status).toBe('conflict');
     expect(result.conflicts[0].bookmarkId).toBe('same');
     expect(repository.metadata.status).toBe('conflict');
+  });
+
+  it('converges edited and deleted collections by newer revision', async () => {
+    const repository = new MemoryRepository();
+    await repository.putCollection(collection('folder', 'Local name', 1));
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync', schemaVersion: 1, generatedAt: '2024-01-03T00:00:00.000Z', deviceId: 'device-b',
+      bookmarks: [],
+      collections: [collection('folder', 'Remote name', 2, '2024-01-02T00:00:00.000Z')],
+    };
+
+    await new WebDavSyncEngine(repository, client).sync();
+    expect((await repository.listCollections())[0].name).toBe('Remote name');
+    expect(client.snapshot.manifest?.collections[0].name).toBe('Remote name');
+
+    client.snapshot.manifest = {
+      ...client.snapshot.manifest!,
+      generatedAt: '2024-01-04T00:00:00.000Z',
+      collections: [collection('folder', 'Remote name', 3, '2024-01-03T00:00:00.000Z', '2024-01-03T00:00:00.000Z')],
+    };
+    await new WebDavSyncEngine(repository, client).sync();
+    expect((await repository.listCollections())[0].deletedAt).toBe('2024-01-03T00:00:00.000Z');
+    expect(client.snapshot.manifest?.collections[0].deletedAt).toBe('2024-01-03T00:00:00.000Z');
   });
 });
 

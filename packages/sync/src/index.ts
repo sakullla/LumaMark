@@ -51,6 +51,17 @@ function changedSince(bookmark: Bookmark, lastSyncAt?: string): boolean {
   return !lastSyncAt || bookmark.updatedAt > lastSyncAt;
 }
 
+function equalCollection(left: Collection, right: Collection): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function newerCollection(left: Collection, right: Collection): Collection {
+  if (right.revision !== left.revision) return right.revision > left.revision ? right : left;
+  if (right.updatedAt !== left.updatedAt) return right.updatedAt > left.updatedAt ? right : left;
+  // Deterministic tie-breaker keeps both devices convergent when clocks collide.
+  return JSON.stringify(right) > JSON.stringify(left) ? right : left;
+}
+
 function manifestFor(deviceId: string, bookmarks: Bookmark[], collections: Collection[], now = new Date().toISOString()): SyncManifest {
   return {
     format: 'lumamark-sync',
@@ -85,9 +96,21 @@ export class WebDavSyncEngine {
       const ids = new Set([...byId.keys(), ...remoteById.keys()]);
       const mergedCollections = new Map<string, Collection>(localCollections.map((item) => [item.id, item]));
       for (const collection of remoteCollections) {
-        if (!mergedCollections.has(collection.id)) {
+        const localCollection = mergedCollections.get(collection.id);
+        if (!localCollection) {
           mergedCollections.set(collection.id, collection);
           await this.repository.putCollection(collection);
+          continue;
+        }
+        if (equalCollection(localCollection, collection)) continue;
+
+        // Collection conflicts use the same monotonic revision/tombstone rule as
+        // bookmarks. The newer version wins so edits and deletes converge even
+        // though ConflictRecord currently models bookmark fields only.
+        const selected = newerCollection(localCollection, collection);
+        mergedCollections.set(collection.id, selected);
+        if (selected !== localCollection) {
+          await this.repository.putCollection(selected);
         }
       }
 
