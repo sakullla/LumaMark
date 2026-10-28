@@ -3,7 +3,7 @@ import { captureActivePage, notifySaveResult, resolveExtensionApi, saveActionsFo
 import { readPageMetadata } from '../../apps/extension/src/content/index';
 import { BookmarkService, makeBookmark } from '../../packages/domain/src/index';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 describe('browser adapter', () => {
   it('captures the active tab and preserves a missing title for domain fallback', async () => {
@@ -55,6 +55,10 @@ describe('browser adapter', () => {
       for (const file of ['manifest.json', 'background.js', 'content.js', 'popup.html', 'library.html', 'settings.html']) {
         expect(existsSync(`dist/extension/${target}/${file}`)).toBe(true);
       }
+      expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('lumamark-save-page');
+      expect(readFileSync(`dist/extension/${target}/content.js`, 'utf8')).toContain('lumamark-page-metadata');
+      expect(readFileSync(`dist/extension/${target}/popup.js`, 'utf8')).toContain('lumamark-save');
+      expect(readFileSync(`dist/extension/${target}/library.js`, 'utf8')).toContain('lumamark-list');
     }
   });
 });
