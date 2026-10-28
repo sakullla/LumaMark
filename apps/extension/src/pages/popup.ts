@@ -44,6 +44,10 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
   const undo = root.querySelector<HTMLButtonElement>('#undo');
   const recent = root.querySelector<HTMLOListElement>('#recent');
   const setStatus = (value: string) => { if (status) status.textContent = value; };
+  void sendRuntime(port, 'list-collections').then((response) => {
+    const select = root.querySelector<HTMLSelectElement>('#save-collection');
+    if (select && Array.isArray(response?.items)) select.innerHTML = '<option value="">No collection</option>' + response.items.filter((item: any) => !item.deletedAt).map((item: any) => `<option value="${item.id}">${item.name}</option>`).join('');
+  }).catch(() => undefined);
   const refresh = async (text = '') => {
     try {
       const response = await sendRuntime(port, 'list', { text });

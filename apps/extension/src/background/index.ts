@@ -51,12 +51,14 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
   let syncConfig: SyncConfig | undefined;
   let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
   let lastUndo: () => Promise<void> = async () => undefined;
+  let lastSavePage: Awaited<ReturnType<typeof captureActivePage>> | undefined;
   const openLibrary = async () => {
     const url = api.runtime?.getURL?.('library.html') ?? 'library.html';
     await api.tabs.create?.({ url });
   };
   const save = async (options: { collectionId?: string; tags?: string[]; notes?: string } = {}) => {
     const page = await captureActivePage(api);
+    lastSavePage = page;
     const result = await service.save({ ...page, collectionId: options.collectionId, tags: options.tags, notes: options.notes }, 'existing');
     lastUndo = result.kind === 'saved'
       ? async () => { await service.remove(result.bookmark.id); }
@@ -97,6 +99,13 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
     if (type === 'lumamark-save') { void save(payload).then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
     if (type === 'lumamark-open-library') { void openLibrary().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
     if (type === 'lumamark-undo') { void lastUndo().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
+    if (type === 'lumamark-update-existing' || type === 'lumamark-copy-existing') {
+      void (async () => {
+        if (!lastSavePage) throw new Error('No existing save to act on');
+        const result = await service.save(lastSavePage, type === 'lumamark-update-existing' ? 'update' : 'copy');
+        return result;
+      })().then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
+    }
     if (type === 'lumamark-list') {
       const payload = (message as { payload?: { text?: string; includeDeleted?: boolean } }).payload;
       void repository.list({ includeDeleted: payload?.includeDeleted ?? false, text: payload?.text }).then((items) => sendResponse({ ok: true, items }));
