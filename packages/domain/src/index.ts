@@ -40,6 +40,15 @@ export interface SyncMetadata {
   autoSync: boolean;
 }
 
+export interface SyncConfig {
+  key: 'sync-config';
+  url: string;
+  path: string;
+  username?: string;
+  password?: string;
+  autoSync: boolean;
+}
+
 export interface ConflictRecord {
   id: string;
   bookmarkId: BookmarkId;

@@ -6,6 +6,7 @@ import {
   ConflictRecord,
   CURRENT_SCHEMA_VERSION,
   SyncMetadata,
+  SyncConfig,
 } from '../../domain/src/index';
 
 const DB_VERSION = 2;
@@ -149,6 +150,21 @@ export class IndexedDbRepository implements BookmarkRepository {
     const db = await this.db();
     const tx = db.transaction(META, 'readwrite');
     tx.objectStore(META).put(metadata);
+    await transactionDone(tx);
+  }
+
+  async getSyncConfig(): Promise<SyncConfig | undefined> {
+    const db = await this.db();
+    const tx = db.transaction(META, 'readonly');
+    const value = await requestResult(tx.objectStore(META).get('sync-config'));
+    await transactionDone(tx);
+    return value;
+  }
+
+  async setSyncConfig(config: SyncConfig): Promise<void> {
+    const db = await this.db();
+    const tx = db.transaction(META, 'readwrite');
+    tx.objectStore(META).put(config);
     await transactionDone(tx);
   }
 

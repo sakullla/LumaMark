@@ -1,10 +1,8 @@
 import { IndexedDbRepository } from '../../../../packages/storage/src/index';
-import { BookmarkService, Collection } from '../../../../packages/domain/src/index';
-import { exportLumaMarkJson, parseBookmarksHtml, parseLumaMarkJson } from '../../../../packages/import-export/src/index';
+import { BookmarkService, Collection, type SyncConfig } from '../../../../packages/domain/src/index';
+import { exportLumaMarkJson, parseBookmarksHtml, parseLumaMarkJson, planImport, type DuplicateImportAction } from '../../../../packages/import-export/src/index';
 import { WebDavSyncEngine, type WebDavClient, type SyncManifest } from '../../../../packages/sync/src/index';
 import { notifySaveResult, registerSaveEntrypoints, resolveExtensionApi, saveActivePage } from '../../../../packages/browser/src/index';
-
-interface SyncConfig { url: string; path: string; username?: string; password?: string; autoSync: boolean }
 
 function webDavClient(config: SyncConfig): WebDavClient {
   const endpoint = `${config.url.replace(/\/$/, '')}/${config.path.replace(/^\//, '')}`;
@@ -31,6 +29,7 @@ export function startBackground(api = resolveExtensionApi()): void {
   const repository = new IndexedDbRepository();
   const service = new BookmarkService(repository);
   let syncConfig: SyncConfig | undefined;
+  let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
   let lastUndo: () => Promise<void> = async () => undefined;
   const openLibrary = async () => {
     const url = api.runtime?.getURL?.('library.html') ?? 'library.html';
@@ -49,6 +48,25 @@ export function startBackground(api = resolveExtensionApi()): void {
       copyExisting: async () => { if (result.kind === 'existing') await service.save({ url: result.existing.url, title: result.existing.title }, 'copy'); },
     });
   };
+  const loadSyncConfig = async () => {
+    syncConfig = await repository.getSyncConfig();
+    return syncConfig;
+  };
+  const scheduleAutoSync = () => {
+    if (autoSyncTimer) clearTimeout(autoSyncTimer);
+    if (!syncConfig?.autoSync || !syncConfig.url) return;
+    autoSyncTimer = setTimeout(async () => {
+      if (!syncConfig?.autoSync) return;
+      const result = await new WebDavSyncEngine(repository, webDavClient(syncConfig)).sync();
+      if (result.status === 'error') {
+        syncConfig = { ...syncConfig, autoSync: false };
+        await repository.setSyncConfig(syncConfig);
+        const metadata = await repository.getSyncMetadata();
+        await repository.setSyncMetadata({ ...metadata, autoSync: false });
+      } else scheduleAutoSync();
+    }, 5 * 60 * 1000);
+  };
+  void loadSyncConfig().then(scheduleAutoSync);
   registerSaveEntrypoints(api, save);
   api.runtime?.onMessage?.addListener((message: unknown, _sender: unknown, sendResponse) => {
     const type = typeof message === 'object' && message !== null && 'type' in message
@@ -86,11 +104,21 @@ export function startBackground(api = resolveExtensionApi()): void {
     if (type === 'lumamark-restore') { void service.restore(payload.id).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return; }
     if (type === 'lumamark-sync-configure') {
       syncConfig = { url: String(payload.url ?? ''), path: String(payload.path ?? 'lumamark.json'), username: payload.username ? String(payload.username) : undefined, password: payload.password ? String(payload.password) : undefined, autoSync: Boolean(payload.autoSync) };
-      void repository.getSyncMetadata().then((metadata) => repository.setSyncMetadata({ ...metadata, autoSync: syncConfig!.autoSync, status: 'idle', error: undefined })).then(() => sendResponse({ ok: true })); return;
+      void repository.setSyncConfig({ key: 'sync-config', ...syncConfig }).then(() => repository.getSyncMetadata()).then((metadata) => repository.setSyncMetadata({ ...metadata, autoSync: syncConfig!.autoSync, status: 'idle', error: undefined })).then(() => { scheduleAutoSync(); sendResponse({ ok: true }); }); return;
     }
     if (type === 'lumamark-sync') {
-      if (!syncConfig?.url) { sendResponse({ ok: false, status: 'error', error: 'WebDAV is not configured' }); return; }
-      void new WebDavSyncEngine(repository, webDavClient(syncConfig)).sync().then((result) => sendResponse(result)); return;
+      void (async () => {
+        const config = syncConfig ?? await loadSyncConfig();
+        if (!config?.url) { sendResponse({ ok: false, status: 'error', error: 'WebDAV is not configured' }); return; }
+        const result = await new WebDavSyncEngine(repository, webDavClient(config)).sync();
+        if (result.status === 'error' && config.autoSync) {
+          syncConfig = { ...config, autoSync: false };
+          await repository.setSyncConfig(syncConfig);
+          const metadata = await repository.getSyncMetadata();
+          await repository.setSyncMetadata({ ...metadata, autoSync: false });
+        }
+        sendResponse(result);
+      })(); return;
     }
     if (type === 'lumamark-export') {
       void Promise.all([repository.list({ includeDeleted: true }), repository.listCollections()]).then(([bookmarks, collections]) => sendResponse({ ok: true, content: exportLumaMarkJson(bookmarks, collections) })); return;
@@ -98,9 +126,12 @@ export function startBackground(api = resolveExtensionApi()): void {
     if (type === 'lumamark-import') {
       void (async () => {
         const parsed = payload.format === 'html' ? parseBookmarksHtml(String(payload.content ?? '')) : parseLumaMarkJson(String(payload.content ?? ''));
-        for (const bookmark of parsed.bookmarks) await repository.put(bookmark);
+        const existing = await repository.list({ includeDeleted: true });
+        const action = (['skip', 'update', 'copy'] as const).includes(payload.action) ? payload.action as DuplicateImportAction : 'skip';
+        const plan = planImport(parsed, existing, action);
+        for (const entry of plan.entries) await repository.put(entry.bookmark);
         for (const collection of parsed.collections as Collection[]) await repository.putCollection(collection);
-        sendResponse({ ok: true, issues: parsed.issues, imported: parsed.bookmarks.length });
+        sendResponse({ ok: true, issues: plan.issues, imported: plan.entries.length, duplicateAction: action, choices: plan.issues.filter((issue) => issue.kind === 'duplicate').length });
       })().catch((error) => sendResponse({ ok: false, error: String(error) })); return;
     }
   });
