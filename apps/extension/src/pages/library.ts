@@ -57,7 +57,16 @@ export function mountLibrary(root: ParentNode = document, port: RuntimePort = (g
     if (!action || !id) return;
     try {
       if (action === 'favorite') await sendRuntime(port, 'favorite', { id });
-      if (action === 'delete') await sendRuntime(port, 'delete', { id });
+      if (action === 'delete') {
+        if (!globalThis.confirm?.('Delete this bookmark? You can undo this action.')) return;
+        await sendRuntime(port, 'delete', { id });
+        if (status()) {
+          status()!.textContent = 'Bookmark deleted. ';
+          const undo = document.createElement('button'); undo.type = 'button'; undo.textContent = 'Undo';
+          undo.addEventListener('click', async () => { await sendRuntime(port, 'undo'); undo.disabled = true; status()!.textContent = 'Bookmark restored.'; await load(); });
+          status()!.append(undo);
+        }
+      }
       if (action === 'edit') {
         const bookmark = state.bookmarks.find((item) => item.id === id);
         const title = globalThis.prompt?.('Bookmark title', bookmark?.title ?? '');
@@ -71,7 +80,10 @@ export function mountLibrary(root: ParentNode = document, port: RuntimePort = (g
   });
   root.querySelector<HTMLButtonElement>('#batch-delete')?.addEventListener('click', async () => {
     const ids = [...root.querySelectorAll<HTMLInputElement>('[data-select-bookmark]:checked')].map((box) => box.dataset.selectBookmark).filter(Boolean);
-    for (const id of ids) await sendRuntime(port, 'delete', { id }); await load();
+    if (!ids.length || !globalThis.confirm?.(`Delete ${ids.length} selected bookmarks? You can undo this action.`)) return;
+    await sendRuntime(port, 'delete', { ids });
+    if (status()) status()!.textContent = `${ids.length} bookmarks deleted. Use Undo in the popup to restore.`;
+    await load();
   });
   root.querySelector<HTMLButtonElement>('#batch-move')?.addEventListener('click', async () => {
     const ids = [...root.querySelectorAll<HTMLInputElement>('[data-select-bookmark]:checked')].map((box) => box.dataset.selectBookmark).filter(Boolean);
