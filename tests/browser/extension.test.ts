@@ -59,8 +59,18 @@ describe('browser adapter', () => {
       }
       expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('lumamark-save-page');
       expect(readFileSync(`dist/extension/${target}/content.js`, 'utf8')).toContain('lumamark-page-metadata');
-      expect(readFileSync(`dist/extension/${target}/popup.js`, 'utf8')).toContain('lumamark-save');
-      expect(readFileSync(`dist/extension/${target}/library.js`, 'utf8')).toContain('lumamark-list');
+      const popup = readFileSync(`dist/extension/${target}/popup.js`, 'utf8');
+      const library = readFileSync(`dist/extension/${target}/library.js`, 'utf8');
+      const settings = readFileSync(`dist/extension/${target}/settings.js`, 'utf8');
+      expect(popup).toContain('lumamark-save');
+      expect(popup).toContain('Undo last save');
+      expect(library).toContain('lumamark-list');
+      expect(library).toContain('No matching bookmarks');
+      expect(library).toContain('batch-delete');
+      expect(settings).toContain('lumamark-sync-configure');
+      expect(settings).toContain('lumamark-import');
+      expect(settings).toContain('lumamark-export');
+      expect(settings).not.toContain('Sync requested. Configure WebDAV in the host app.');
     }
   });
 

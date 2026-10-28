@@ -16,7 +16,18 @@ export async function sendRuntime(port: RuntimePort, action: RuntimeAction, payl
 }
 
 export function popupRuntimeMessage(action: RuntimeAction, payload?: unknown): RuntimeMessage {
-  return { type: `lumamark-${action}`, ...(payload === undefined ? {} : { payload }) } as RuntimeMessage;
+  // Keep the wire names explicit in the browser bundle. Besides making the
+  // runtime contract easy to inspect, this avoids relying on a template
+  // string when a browser's message bridge serializes the action.
+  const runtimeTypes: Record<RuntimeAction, RuntimeMessage['type']> = {
+    save: 'lumamark-save', undo: 'lumamark-undo', 'open-library': 'lumamark-open-library',
+    list: 'lumamark-list', 'list-collections': 'lumamark-list-collections',
+    'update-existing': 'lumamark-update-existing', 'copy-existing': 'lumamark-copy-existing',
+    update: 'lumamark-update', delete: 'lumamark-delete', restore: 'lumamark-restore',
+    favorite: 'lumamark-favorite', sync: 'lumamark-sync', 'sync-configure': 'lumamark-sync-configure',
+    export: 'lumamark-export', import: 'lumamark-import',
+  };
+  return { type: runtimeTypes[action], ...(payload === undefined ? {} : { payload }) };
 }
 
 export function popupStatus(kind: 'saving' | 'saved' | 'existing' | 'error' | 'undone', detail = ''): string {
