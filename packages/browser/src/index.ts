@@ -12,8 +12,14 @@ export interface ExtensionTabs {
   create?(properties: { url: string }): Promise<unknown>;
 }
 
+export interface SaveAction {
+  id: 'open-library' | 'undo' | 'open-existing' | 'update-existing' | 'copy-existing';
+  title: string;
+}
+
 export interface ExtensionNotifications {
-  create?(id: string, options: { type: 'basic'; title: string; message: string; iconUrl?: string }): Promise<string>;
+  create?(id: string, options: { type: 'basic'; title: string; message: string; iconUrl?: string; buttons?: Array<{ title: string }> }): Promise<string>;
+  onButtonClicked?: { addListener(listener: (id: string, buttonIndex: number) => void): void };
 }
 
 export interface ExtensionContextMenus {
@@ -36,6 +42,14 @@ export interface WebExtensionApi {
   contextMenus?: ExtensionContextMenus;
   commands?: ExtensionCommands;
   runtime?: ExtensionRuntime;
+}
+
+export interface SaveActionHandlers {
+  openLibrary?: () => Promise<void> | void;
+  undo?: () => Promise<void> | void;
+  openExisting?: () => Promise<void> | void;
+  updateExisting?: () => Promise<void> | void;
+  copyExisting?: () => Promise<void> | void;
 }
 
 export interface CapturedPage {
@@ -83,13 +97,41 @@ export function registerSaveEntrypoints(
   });
 }
 
-export async function notifySaveResult(api: WebExtensionApi, result: SaveBookmarkResult): Promise<void> {
+export function saveActionsForResult(result: SaveBookmarkResult): SaveAction[] {
+  if (result.kind === 'existing') {
+    return [
+      { id: 'open-existing', title: 'Open existing' },
+      { id: 'update-existing', title: 'Update metadata' },
+      { id: 'copy-existing', title: 'Save copy' },
+    ];
+  }
+  return [
+    { id: 'open-library', title: 'Open library' },
+    { id: 'undo', title: 'Undo' },
+  ];
+}
+
+export async function notifySaveResult(api: WebExtensionApi, result: SaveBookmarkResult, handlers: SaveActionHandlers = {}): Promise<void> {
   if (!api.notifications?.create) return;
-  const message = result.kind === 'existing' ? 'This URL is already saved. Open or update it from the library.' : 'Saved to LumaMark. You can open the library or undo this save.';
-  await api.notifications.create(`lumamark-${Date.now()}`, {
+  const notificationId = `lumamark-${Date.now()}`;
+  const actions = saveActionsForResult(result);
+  const message = result.kind === 'existing' ? 'Already saved. Choose an action.' : 'Saved. Open the library or undo this save.';
+  await api.notifications.create(notificationId, {
     type: 'basic',
     title: result.kind === 'existing' ? 'Already saved' : 'Bookmark saved',
     message,
+    buttons: actions.map((action) => ({ title: action.title })),
+  });
+  api.notifications.onButtonClicked?.addListener((id, index) => {
+    if (id !== notificationId) return;
+    const action = actions[index];
+    if (!action) return;
+    const handlerKey = action.id === 'open-library' ? 'openLibrary'
+      : action.id === 'open-existing' ? 'openExisting'
+        : action.id === 'update-existing' ? 'updateExisting'
+          : action.id === 'copy-existing' ? 'copyExisting' : 'undo';
+    const handler = handlers[handlerKey];
+    if (handler) void handler();
   });
 }
 

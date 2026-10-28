@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { captureActivePage, resolveExtensionApi, saveActivePage } from '../../packages/browser/src/index';
+import { captureActivePage, notifySaveResult, resolveExtensionApi, saveActionsForResult, saveActivePage } from '../../packages/browser/src/index';
 import { readPageMetadata } from '../../apps/extension/src/content/index';
-import { BookmarkService } from '../../packages/domain/src/index';
+import { BookmarkService, makeBookmark } from '../../packages/domain/src/index';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 describe('browser adapter', () => {
   it('captures the active tab and preserves a missing title for domain fallback', async () => {
@@ -31,6 +33,29 @@ describe('browser adapter', () => {
   it('resolves browser before chrome APIs', () => {
     const tabs = { query: vi.fn() };
     expect(resolveExtensionApi({ browser: { tabs }, chrome: { tabs: { query: vi.fn() } } })).toEqual({ tabs });
+  });
+
+  it('exposes actionable save feedback for saved and existing records', async () => {
+    const saved = { kind: 'saved' as const, bookmark: makeBookmark({ url: 'https://example.test' }), undoToken: 'x' };
+    expect(saveActionsForResult(saved).map((action) => action.id)).toEqual(['open-library', 'undo']);
+    const existing = { kind: 'existing' as const, existing: saved.bookmark };
+    expect(saveActionsForResult(existing).map((action) => action.id)).toEqual(['open-existing', 'update-existing', 'copy-existing']);
+    const clicked: string[] = [];
+    let onButton: ((id: string, index: number) => void) | undefined;
+    const api = { tabs: { query: vi.fn() }, notifications: { create: vi.fn().mockResolvedValue('id'), onButtonClicked: { addListener: (listener: (id: string, index: number) => void) => { onButton = listener; } } } };
+    await notifySaveResult(api, saved, { undo: () => { clicked.push('undo'); } });
+    expect(api.notifications.create).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ buttons: [{ title: 'Open library' }, { title: 'Undo' }] }));
+    onButton?.(api.notifications.create.mock.calls[0][0], 1);
+    expect(clicked).toEqual(['undo']);
+  });
+
+  it('builds installable files for every browser target', () => {
+    execFileSync(process.execPath, ['scripts/build-extension.mjs'], { stdio: 'ignore' });
+    for (const target of ['chrome', 'firefox', 'safari']) {
+      for (const file of ['manifest.json', 'background.js', 'content.js', 'popup.html', 'library.html', 'settings.html']) {
+        expect(existsSync(`dist/extension/${target}/${file}`)).toBe(true);
+      }
+    }
   });
 });
 
