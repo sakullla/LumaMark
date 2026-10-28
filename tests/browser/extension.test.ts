@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { captureActivePage, notifySaveResult, resolveExtensionApi, saveActionsForResult, saveActivePage } from '../../packages/browser/src/index';
 import { readPageMetadata } from '../../apps/extension/src/content/index';
 import { BookmarkService, makeBookmark } from '../../packages/domain/src/index';
+import { planImport } from '../../packages/import-export/src/index';
+import { applyImportPlan } from '../../apps/extension/src/background/index';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 
@@ -60,6 +62,24 @@ describe('browser adapter', () => {
       expect(readFileSync(`dist/extension/${target}/popup.js`, 'utf8')).toContain('lumamark-save');
       expect(readFileSync(`dist/extension/${target}/library.js`, 'utf8')).toContain('lumamark-list');
     }
+  });
+
+  it('updates an existing import in place instead of creating a duplicate', async () => {
+    const existing = makeBookmark({ id: 'existing-id', url: 'https://example.test', title: 'Old title' });
+    const imported = makeBookmark({ id: 'import-id', url: 'https://example.test', title: 'New title' });
+    const records = new Map([[existing.id, existing]]);
+    const repository = {
+      list: async () => [...records.values()],
+      findById: async (id: string) => records.get(id),
+      findByUrl: async (url: string) => [...records.values()].find((item) => item.url === url),
+      put: async (item: typeof existing) => { records.set(item.id, item); },
+      remove: async (id: string) => { records.delete(id); },
+    };
+    const plan = planImport({ bookmarks: [imported], collections: [], issues: [] }, [existing], 'update');
+    await applyImportPlan(plan, new BookmarkService(repository), repository);
+    expect(records.size).toBe(1);
+    expect(records.get(existing.id)?.title).toBe('New title');
+    expect(records.has(imported.id)).toBe(false);
   });
 });
 
