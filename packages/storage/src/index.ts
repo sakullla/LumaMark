@@ -2,13 +2,15 @@ import {
   Bookmark,
   BookmarkQuery,
   BookmarkRepository,
+  Collection,
   ConflictRecord,
   CURRENT_SCHEMA_VERSION,
   SyncMetadata,
 } from '../../domain/src/index';
 
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const BOOKMARKS = 'bookmarks';
+const COLLECTIONS = 'collections';
 const META = 'meta';
 const CONFLICTS = 'conflicts';
 
@@ -42,6 +44,11 @@ export class IndexedDbRepository implements BookmarkRepository {
           store.createIndex('url', 'url', { unique: false });
           store.createIndex('updatedAt', 'updatedAt', { unique: false });
           store.createIndex('collectionId', 'collectionId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains(COLLECTIONS)) {
+          const store = db.createObjectStore(COLLECTIONS, { keyPath: 'id' });
+          store.createIndex('parentId', 'parentId', { unique: false });
+          store.createIndex('updatedAt', 'updatedAt', { unique: false });
         }
         if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: 'key' });
         if (!db.objectStoreNames.contains(CONFLICTS)) db.createObjectStore(CONFLICTS, { keyPath: 'id' });
@@ -103,6 +110,21 @@ export class IndexedDbRepository implements BookmarkRepository {
     const db = await this.db();
     const tx = db.transaction(BOOKMARKS, 'readwrite');
     tx.objectStore(BOOKMARKS).delete(id);
+    await transactionDone(tx);
+  }
+
+  async listCollections(): Promise<Collection[]> {
+    const db = await this.db();
+    const tx = db.transaction(COLLECTIONS, 'readonly');
+    const values = await requestResult(tx.objectStore(COLLECTIONS).getAll());
+    await transactionDone(tx);
+    return values;
+  }
+
+  async putCollection(collection: Collection): Promise<void> {
+    const db = await this.db();
+    const tx = db.transaction(COLLECTIONS, 'readwrite');
+    tx.objectStore(COLLECTIONS).put(collection);
     await transactionDone(tx);
   }
 

@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { IndexedDbRepository } from '../../packages/storage/src/index';
-import { makeBookmark } from '../../packages/domain/src/index';
+import { makeBookmark, Collection } from '../../packages/domain/src/index';
 
 const repositories: IndexedDbRepository[] = [];
 afterEach(async () => {
@@ -41,5 +41,21 @@ describe('IndexedDbRepository', () => {
     const remote = { ...local, title: 'Remote', revision: 2 };
     await repository.putConflict({ id: 'c1', bookmarkId: local.id, local, remote, fields: ['title'], createdAt: new Date().toISOString() });
     expect((await repository.listConflicts()).map((item) => item.id)).toEqual(['c1']);
+  });
+
+  it('persists collection hierarchy for sync consumers', async () => {
+    const repository = new IndexedDbRepository(`test-${crypto.randomUUID()}`);
+    repositories.push(repository);
+    const parent: Collection = {
+      id: 'parent', name: 'Parent', position: 0,
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', revision: 1,
+    };
+    const child: Collection = {
+      id: 'child', name: 'Child', parentId: parent.id, position: 0,
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', revision: 1,
+    };
+    await repository.putCollection(parent);
+    await repository.putCollection(child);
+    expect((await repository.listCollections()).sort((a, b) => a.id.localeCompare(b.id))).toEqual([child, parent]);
   });
 });

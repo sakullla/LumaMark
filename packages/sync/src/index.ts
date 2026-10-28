@@ -27,9 +27,8 @@ export interface WebDavClient {
 }
 
 export interface SyncRepository extends BookmarkRepository {
-  /** Collection persistence is optional for legacy repositories; sync carries all available collections. */
-  listCollections?: () => Promise<Collection[]>;
-  putCollection?: (collection: Collection) => Promise<void>;
+  listCollections: () => Promise<Collection[]>;
+  putCollection: (collection: Collection) => Promise<void>;
   getSyncMetadata(): Promise<SyncMetadata>;
   setSyncMetadata(metadata: SyncMetadata): Promise<void>;
   putConflict(conflict: ConflictRecord): Promise<void>;
@@ -75,7 +74,7 @@ export class WebDavSyncEngine {
     await this.repository.setSyncMetadata(syncing);
     try {
       const local = await this.repository.list({ includeDeleted: true });
-      const localCollections = await this.repository.listCollections?.() ?? [];
+      const localCollections = await this.repository.listCollections();
       const remoteSnapshot = await this.client.read();
       const remote = remoteSnapshot.manifest?.bookmarks ?? [];
       const remoteCollections = remoteSnapshot.manifest?.collections ?? [];
@@ -88,7 +87,7 @@ export class WebDavSyncEngine {
       for (const collection of remoteCollections) {
         if (!mergedCollections.has(collection.id)) {
           mergedCollections.set(collection.id, collection);
-          await this.repository.putCollection?.(collection);
+          await this.repository.putCollection(collection);
         }
       }
 
