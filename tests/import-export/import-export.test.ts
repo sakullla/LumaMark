@@ -32,5 +32,26 @@ describe('import/export', () => {
     expect(copy.entries[0].action).toBe('copy');
     expect(copy.entries[0].bookmark.id).not.toBe(bookmark.id);
   });
+
+  it('reports JSON records missing required metadata instead of returning incomplete bookmarks', () => {
+    const result = parseLumaMarkJson(JSON.stringify({
+      format: 'lumamark',
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      bookmarks: [{ id: 'broken', url: 'https://example.test', title: 'Broken', tags: [] }],
+      collections: [],
+    }));
+    expect(result.bookmarks).toHaveLength(0);
+    expect(result.issues.some((issue) => issue.kind === 'invalid-entry')).toBe(true);
+  });
+
+  it('reports unclosed HTML anchors and folder headings', () => {
+    const folder = parseBookmarksHtml('<DL><H3>Folder');
+    const anchor = parseBookmarksHtml('<DL><A HREF="https://example.test">Title');
+    expect(folder.bookmarks).toHaveLength(0);
+    expect(anchor.bookmarks).toHaveLength(0);
+    expect(folder.issues.some((issue) => issue.message.includes('Folder heading'))).toBe(true);
+    expect(anchor.issues.some((issue) => issue.message.includes('Bookmark anchor'))).toBe(true);
+  });
 });
 

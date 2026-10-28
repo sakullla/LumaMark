@@ -78,6 +78,15 @@ export function parseLumaMarkJson(text: string): ImportResult {
       try {
         if (!value || typeof value !== 'object') throw new Error('Invalid bookmark entry');
         const item = value as Bookmark;
+        if (typeof item.createdAt !== 'string' || !item.createdAt) {
+          throw new Error('Bookmark createdAt is required');
+        }
+        if (typeof item.updatedAt !== 'string' || !item.updatedAt) {
+          throw new Error('Bookmark updatedAt is required');
+        }
+        if (typeof item.revision !== 'number' || !Number.isInteger(item.revision) || item.revision < 1) {
+          throw new Error('Bookmark revision must be a positive integer');
+        }
         const url = normalizeUrl(item.url);
         valid.push({
           ...makeBookmark({
@@ -179,6 +188,8 @@ export function parseBookmarksHtml(text: string): ImportResult {
     }
   }
   if (pendingFolder) issues.push({ kind: 'malformed-html', message: `Folder without content: ${pendingFolder}` });
+  if (inAnchor) issues.push({ kind: 'malformed-html', message: 'Bookmark anchor is not closed' });
+  if (inFolder) issues.push({ kind: 'malformed-html', message: 'Folder heading is not closed' });
   return { bookmarks, collections, issues };
 }
 
