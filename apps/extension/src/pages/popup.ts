@@ -73,9 +73,10 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
       await refresh();
     } catch (error) { setStatus(popupStatus('error', String(error))); }
   });
+  const saveOptions = () => ({ collectionId: root.querySelector<HTMLSelectElement>('#save-collection')?.value || undefined, tags: (root.querySelector<HTMLInputElement>('#save-tags')?.value ?? '').split(',').map((tag) => tag.trim()).filter(Boolean), notes: root.querySelector<HTMLTextAreaElement>('#save-notes')?.value ?? '' });
   root.querySelector<HTMLButtonElement>('#open-existing')?.addEventListener('click', () => { void sendRuntime(port, 'open-library'); });
-  root.querySelector<HTMLButtonElement>('#update-existing')?.addEventListener('click', () => { void sendRuntime(port, 'update-existing'); });
-  root.querySelector<HTMLButtonElement>('#copy-existing')?.addEventListener('click', () => { void sendRuntime(port, 'copy-existing'); });
+  root.querySelector<HTMLButtonElement>('#update-existing')?.addEventListener('click', () => { void sendRuntime(port, 'update-existing', saveOptions()); });
+  root.querySelector<HTMLButtonElement>('#copy-existing')?.addEventListener('click', () => { void sendRuntime(port, 'copy-existing', saveOptions()); });
   undo?.addEventListener('click', async () => {
     await sendRuntime(port, 'undo'); undo.disabled = true; setStatus(popupStatus('undone')); await refresh();
   });

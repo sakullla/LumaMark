@@ -52,6 +52,7 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
   let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
   let lastUndo: () => Promise<void> = async () => undefined;
   let lastSavePage: Awaited<ReturnType<typeof captureActivePage>> | undefined;
+  let lastSaveOptions: { collectionId?: string; tags?: string[]; notes?: string } = {};
   const openLibrary = async () => {
     const url = api.runtime?.getURL?.('library.html') ?? 'library.html';
     await api.tabs.create?.({ url });
@@ -59,6 +60,7 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
   const save = async (options: { collectionId?: string; tags?: string[]; notes?: string } = {}) => {
     const page = await captureActivePage(api);
     lastSavePage = page;
+    lastSaveOptions = options;
     const result = await service.save({ ...page, collectionId: options.collectionId, tags: options.tags, notes: options.notes }, 'existing');
     lastUndo = result.kind === 'saved'
       ? async () => { await service.remove(result.bookmark.id); }
@@ -102,7 +104,7 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
     if (type === 'lumamark-update-existing' || type === 'lumamark-copy-existing') {
       void (async () => {
         if (!lastSavePage) throw new Error('No existing save to act on');
-        const result = await service.save(lastSavePage, type === 'lumamark-update-existing' ? 'update' : 'copy');
+        const result = await service.save({ ...lastSavePage, ...lastSaveOptions, ...(payload ?? {}) }, type === 'lumamark-update-existing' ? 'update' : 'copy');
         return result;
       })().then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
     }
