@@ -2,7 +2,7 @@ import { IndexedDbRepository } from '../../../../packages/storage/src/index';
 import { BookmarkService, Collection, type BookmarkRepository, type SyncConfig } from '../../../../packages/domain/src/index';
 import { exportLumaMarkJson, parseBookmarksHtml, parseLumaMarkJson, planImport, type DuplicateImportAction, type ImportPlan } from '../../../../packages/import-export/src/index';
 import { WebDavSyncEngine, type WebDavClient, type SyncManifest } from '../../../../packages/sync/src/index';
-import { notifySaveResult, registerSaveEntrypoints, resolveExtensionApi, saveActivePage } from '../../../../packages/browser/src/index';
+import { captureActivePage, notifySaveResult, registerSaveEntrypoints, resolveExtensionApi } from '../../../../packages/browser/src/index';
 
 function webDavClient(config: SyncConfig): WebDavClient {
   const endpoint = `${config.url.replace(/\/$/, '')}/${config.path.replace(/^\//, '')}`;
@@ -46,8 +46,7 @@ export async function applyImportPlan(plan: ImportPlan, service: BookmarkService
   return plan.entries.length;
 }
 
-export function startBackground(api = resolveExtensionApi()): void {
-  const repository = new IndexedDbRepository();
+export function startBackground(api = resolveExtensionApi(), repository = new IndexedDbRepository()): void {
   const service = new BookmarkService(repository);
   let syncConfig: SyncConfig | undefined;
   let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
@@ -57,7 +56,8 @@ export function startBackground(api = resolveExtensionApi()): void {
     await api.tabs.create?.({ url });
   };
   const save = async () => {
-    const result = await saveActivePage(api, service);
+    const page = await captureActivePage(api);
+    const result = await service.save(page, 'existing');
     lastUndo = result.kind === 'saved'
       ? async () => { await service.remove(result.bookmark.id); }
       : async () => undefined;
@@ -65,8 +65,8 @@ export function startBackground(api = resolveExtensionApi()): void {
       openLibrary,
       undo: lastUndo,
       openExisting: openLibrary,
-      updateExisting: async () => { if (result.kind === 'existing') await service.save({ url: result.existing.url, title: result.existing.title }, 'update'); },
-      copyExisting: async () => { if (result.kind === 'existing') await service.save({ url: result.existing.url, title: result.existing.title }, 'copy'); },
+      updateExisting: async () => { if (result.kind === 'existing') await service.save(page, 'update'); },
+      copyExisting: async () => { if (result.kind === 'existing') await service.save(page, 'copy'); },
     });
     return result;
   };

@@ -5,6 +5,7 @@ import { readPageMetadata } from '../../apps/extension/src/content/index';
 import { BookmarkService, makeBookmark } from '../../packages/domain/src/index';
 import { planImport } from '../../packages/import-export/src/index';
 import { applyImportPlan, startBackground } from '../../apps/extension/src/background/index';
+import { IndexedDbRepository } from '../../packages/storage/src/index';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 
@@ -77,10 +78,11 @@ describe('browser adapter', () => {
   });
 
   it('keeps asynchronous background responses open for runtime messages', async () => {
-    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    type RuntimeMessageListener = (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void;
+    let listener: RuntimeMessageListener | undefined;
     const api = {
       tabs: { query: vi.fn().mockResolvedValue([]), create: vi.fn().mockResolvedValue(undefined) },
-      runtime: { onMessage: { addListener: (callback: typeof listener extends infer T ? T : never) => { listener = callback; } } },
+      runtime: { onMessage: { addListener: (callback: RuntimeMessageListener) => { listener = callback; } } },
     };
     startBackground(api);
 
@@ -89,6 +91,47 @@ describe('browser adapter', () => {
     const keepChannelOpen = listener?.({ type: 'lumamark-list' }, {}, (value) => { response = value; });
     expect(keepChannelOpen).toBe(true);
     await vi.waitFor(() => expect(response).toEqual({ ok: true, items: [] }));
+  });
+
+  it('uses current page metadata for existing bookmark update and copy actions', async () => {
+    type RuntimeMessageListener = (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void;
+    const repository = new IndexedDbRepository(`lumamark-metadata-${crypto.randomUUID()}`);
+    let activeTab = { url: 'https://example.test', title: 'Original title', favIconUrl: 'https://example.test/original.ico' };
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    let notificationButtonListener: ((id: string, buttonIndex: number) => void) | undefined;
+    const api = {
+      tabs: { query: vi.fn().mockImplementation(async () => [activeTab]), create: vi.fn() },
+      notifications: {
+        create: vi.fn().mockResolvedValue('notification-id'),
+        onButtonClicked: { addListener: (callback: (id: string, buttonIndex: number) => void) => { notificationButtonListener = callback; } },
+      },
+      runtime: { onMessage: { addListener: (callback: RuntimeMessageListener) => { listener = callback; } } },
+    };
+    startBackground(api, repository);
+    const send = (message: unknown) => new Promise<unknown>((resolve) => {
+      listener?.(message, {}, resolve);
+    });
+
+    await send({ type: 'lumamark-save' });
+    activeTab = { url: 'https://example.test', title: 'Updated title', favIconUrl: 'https://example.test/updated.ico' };
+    await send({ type: 'lumamark-save' });
+    const existingNotificationId = api.notifications.create.mock.calls.at(-1)?.[0] as string;
+    notificationButtonListener?.(existingNotificationId, 1);
+    await vi.waitFor(async () => {
+      const updated = await repository.findByUrl('https://example.test/');
+      expect(updated?.title).toBe('Updated title');
+      expect(updated?.faviconUrl).toBe('https://example.test/updated.ico');
+    });
+
+    activeTab = { url: 'https://example.test', title: 'Copied title', favIconUrl: 'https://example.test/copied.ico' };
+    await send({ type: 'lumamark-save' });
+    const copyNotificationId = api.notifications.create.mock.calls.at(-1)?.[0] as string;
+    notificationButtonListener?.(copyNotificationId, 2);
+    await vi.waitFor(async () => {
+      const records = await repository.list({ includeDeleted: true });
+      expect(records).toHaveLength(2);
+      expect(records.some((item) => item.title === 'Copied title' && item.faviconUrl === 'https://example.test/copied.ico')).toBe(true);
+    });
   });
 
   it('updates an existing import in place instead of creating a duplicate', async () => {
