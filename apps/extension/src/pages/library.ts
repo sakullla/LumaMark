@@ -33,7 +33,9 @@ export function mountLibrary(root: ParentNode = document, port: RuntimePort = (g
         const collections = await sendRuntime(port, 'list-collections');
         state.collections = Array.isArray(collections?.items) ? collections.items : state.collections;
         const select = root.querySelector<HTMLSelectElement>('#collection');
-        if (select) select.innerHTML = '<option value="">All collections</option>' + state.collections.filter((item) => !item.deletedAt).map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
+        const options = state.collections.filter((item) => !item.deletedAt).map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
+        if (select) select.innerHTML = '<option value="">All collections</option>' + options;
+        const batchSelect = root.querySelector<HTMLSelectElement>('#batch-collection'); if (batchSelect) batchSelect.innerHTML = '<option value="">Choose collection</option>' + options;
       } catch { /* old background versions may not expose collections */ }
       render();
     } catch (error) { if (status()) status()!.textContent = `Unable to load bookmarks. ${String(error)}`; }
