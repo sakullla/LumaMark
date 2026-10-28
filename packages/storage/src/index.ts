@@ -111,13 +111,16 @@ export class IndexedDbRepository implements BookmarkRepository {
     const tx = db.transaction(META, 'readonly');
     const value = await requestResult(tx.objectStore(META).get('sync'));
     await transactionDone(tx);
-    return value ?? {
+    if (value) return value;
+    const metadata: SyncMetadata = {
       key: 'sync',
       deviceId: crypto.randomUUID(),
       pendingChanges: 0,
       status: 'offline',
       autoSync: false,
     };
+    await this.setSyncMetadata(metadata);
+    return metadata;
   }
 
   async setSyncMetadata(metadata: SyncMetadata): Promise<void> {

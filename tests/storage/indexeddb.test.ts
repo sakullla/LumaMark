@@ -34,6 +34,7 @@ describe('IndexedDbRepository', () => {
     repositories.push(repository);
     const metadata = await repository.getSyncMetadata();
     expect(metadata.status).toBe('offline');
+    expect((await repository.getSyncMetadata()).deviceId).toBe(metadata.deviceId);
     await repository.setSyncMetadata({ ...metadata, status: 'idle', pendingChanges: 2 });
     expect((await repository.getSyncMetadata()).pendingChanges).toBe(2);
     const local = makeBookmark({ url: 'https://example.com', title: 'Local' });

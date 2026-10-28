@@ -17,7 +17,7 @@ describe('BookmarkService', () => {
     const result = await service.save({ url: 'https://Example.com/path#fragment' });
     expect(result.kind).toBe('saved');
     if (result.kind === 'saved') {
-      expect(result.bookmark.url).toBe('https://example.com/path');
+      expect(result.bookmark.url).toBe('https://example.com/path#fragment');
       expect(result.bookmark.title).toBe('example.com');
     }
   });

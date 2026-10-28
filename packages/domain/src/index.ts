@@ -116,7 +116,6 @@ export function normalizeUrl(value: string): string {
   if (!['http:', 'https:'].includes(parsed.protocol)) {
     throw new Error('Only http(s) URLs can be saved');
   }
-  parsed.hash = '';
   return parsed.toString();
 }
 
