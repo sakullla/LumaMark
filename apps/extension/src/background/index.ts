@@ -126,7 +126,15 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
         await repository.putCollection(deleted); return deleted;
       }).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
     }
+    if (type === 'lumamark-collection-restore') {
+      void repository.listCollections().then(async (items) => {
+        const current = items.find((item) => item.id === payload.id); if (!current) throw new Error('Collection not found');
+        const restored = { ...current, deletedAt: undefined, updatedAt: new Date().toISOString(), revision: current.revision + 1 };
+        await repository.putCollection(restored); return restored;
+      }).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
+    }
     if (type === 'lumamark-list-conflicts') { void repository.listConflicts().then((items) => sendResponse({ ok: true, items })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
+    if (type === 'lumamark-sync-status') { void repository.getSyncMetadata().then((metadata) => sendResponse({ ok: true, metadata })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
     if (type === 'lumamark-resolve-conflict') {
       void (async () => {
         const config = syncConfig ?? await loadSyncConfig(); if (!config?.url) throw new Error('WebDAV is not configured');

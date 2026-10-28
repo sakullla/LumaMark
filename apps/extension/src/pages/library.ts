@@ -41,7 +41,7 @@ export function mountLibrary(root: ParentNode = document, port: RuntimePort = (g
   const form = root.querySelector<HTMLFormElement>('#filters');
   form?.addEventListener('input', () => {
     const data = new FormData(form);
-    state.filters = { ...state.filters, text: String(data.get('text') ?? ''), collectionId: String(data.get('collectionId') ?? ''), tag: String(data.get('tag') ?? ''), domain: String(data.get('domain') ?? ''), from: String(data.get('from') ?? ''), to: String(data.get('to') ?? ''), favoriteOnly: data.has('favoriteOnly') };
+    state.filters = { ...state.filters, text: String(data.get('text') ?? ''), collectionId: String(data.get('collectionId') ?? ''), tag: String(data.get('tag') ?? ''), domain: String(data.get('domain') ?? ''), from: String(data.get('from') ?? ''), to: String(data.get('to') ?? ''), sort: String(data.get('sort') ?? 'updatedAt') as LibraryFilters['sort'], direction: String(data.get('direction') ?? 'desc') as LibraryFilters['direction'], favoriteOnly: data.has('favoriteOnly') };
     render();
   });
   form?.addEventListener('reset', () => { state.filters = defaultLibraryFilters(); setTimeout(render, 0); });
@@ -84,12 +84,13 @@ export function mountLibrary(root: ParentNode = document, port: RuntimePort = (g
     const ids = [...root.querySelectorAll<HTMLInputElement>('[data-select-bookmark]:checked')].map((box) => box.dataset.selectBookmark).filter(Boolean);
     if (!ids.length || !globalThis.confirm?.(`Delete ${ids.length} selected bookmarks? You can undo this action.`)) return;
     await sendRuntime(port, 'delete', { ids });
-    if (status()) status()!.textContent = `${ids.length} bookmarks deleted. Use Undo in the popup to restore.`;
+    if (status()) { status()!.textContent = `${ids.length} bookmarks deleted. `; const undo = document.createElement('button'); undo.type = 'button'; undo.textContent = 'Undo'; undo.addEventListener('click', async () => { await sendRuntime(port, 'undo'); undo.disabled = true; status()!.textContent = 'Bookmarks restored.'; await load(); }); status()!.append(undo); }
     await load();
   });
   root.querySelector<HTMLButtonElement>('#batch-move')?.addEventListener('click', async () => {
     const ids = [...root.querySelectorAll<HTMLInputElement>('[data-select-bookmark]:checked')].map((box) => box.dataset.selectBookmark).filter(Boolean);
-    const collectionId = globalThis.prompt?.('Move to collection ID', '') ?? ''; if (!collectionId) return;
+    const collectionId = root.querySelector<HTMLSelectElement>('#batch-collection')?.value ?? ''; if (!collectionId) return;
+    if (!ids.length) return;
     await sendRuntime(port, 'update', { ids, update: { collectionId } }); await load();
   });
   root.querySelector<HTMLButtonElement>('#create-collection')?.addEventListener('click', async () => {
@@ -98,7 +99,7 @@ export function mountLibrary(root: ParentNode = document, port: RuntimePort = (g
   });
   root.querySelector<HTMLButtonElement>('#delete-collection')?.addEventListener('click', async () => {
     const id = root.querySelector<HTMLSelectElement>('#collection')?.value; if (!id || !globalThis.confirm?.('Delete this collection? Bookmarks can be restored.')) return;
-    await sendRuntime(port, 'collection-delete', { id }); await load();
+    await sendRuntime(port, 'collection-delete', { id }); if (status()) { status()!.textContent = 'Collection deleted. '; const undo = document.createElement('button'); undo.type = 'button'; undo.textContent = 'Undo'; undo.addEventListener('click', async () => { await sendRuntime(port, 'collection-restore', { id }); undo.disabled = true; status()!.textContent = 'Collection restored.'; await load(); }); status()!.append(undo); } await load();
   });
   void load();
 }

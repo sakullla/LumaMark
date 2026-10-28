@@ -15,6 +15,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = (
   const syncStatus = root.querySelector<HTMLElement>('#sync-status');
   const dataStatus = root.querySelector<HTMLElement>('#data-status');
   const conflicts = root.querySelector<HTMLElement>('#conflicts');
+  const syncMetadata = root.querySelector<HTMLElement>('#sync-metadata');
   const importAction = root.querySelector<HTMLSelectElement>('#import-action');
   const setSync = (status: SettingsStatus, detail = '') => { if (syncStatus) syncStatus.textContent = settingsStatusMessage(status, detail); };
   root.querySelector<HTMLFormElement>('#sync-form')?.addEventListener('submit', async (event) => {
@@ -25,10 +26,10 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = (
   });
   const renderConflicts = async (items: any[] = []) => {
     if (!conflicts) return;
-    conflicts.innerHTML = items.length ? `<h3>Conflicts requiring a choice</h3>${items.map((item) => `<article data-conflict-id="${item.id}"><strong>${item.local?.title ?? item.bookmarkId}</strong><p>Fields: ${(item.fields ?? []).join(', ')}</p><button type="button" data-resolution="local">Keep local</button><button type="button" data-resolution="remote">Keep remote</button><button type="button" data-resolution="merged">Use merged</button></article>`).join('')}` : '';
+    conflicts.innerHTML = items.length ? `<h3>Conflicts requiring a choice</h3>${items.map((item) => `<article data-conflict-id="${item.id}"><strong>Local: ${item.local?.title ?? item.bookmarkId}</strong><p>Remote: ${item.remote?.title ?? ''}</p><p>Local notes: ${item.local?.notes ?? ''}</p><p>Remote notes: ${item.remote?.notes ?? ''}</p><p>Fields: ${(item.fields ?? []).join(', ')}</p><button type="button" data-resolution="local">Keep local</button><button type="button" data-resolution="remote">Keep remote</button><button type="button" data-resolution="merged">Edit merged</button></article>`).join('')}` : '';
     conflicts.querySelectorAll<HTMLButtonElement>('[data-resolution]').forEach((button) => button.addEventListener('click', async () => { const card = button.closest<HTMLElement>('[data-conflict-id]'); if (!card) return; const item = items.find((entry) => entry.id === card.dataset.conflictId); let merged = undefined; if (button.dataset.resolution === 'merged' && item?.local) { const title = globalThis.prompt?.('Merged title', item.local.title); if (title === null) return; const notes = globalThis.prompt?.('Merged notes', item.local.notes) ?? item.local.notes; merged = { ...item.local, title: title ?? item.local.title, notes }; } await sendRuntime(port, 'resolve-conflict', { id: card.dataset.conflictId, resolution: button.dataset.resolution, merged }); await loadConflicts(); }));
   };
-  const loadConflicts = async () => { try { const response = await sendRuntime(port, 'list-conflicts'); await renderConflicts(Array.isArray(response?.items) ? response.items : []); } catch { /* optional on older background */ } };
+  const loadConflicts = async () => { try { const response = await sendRuntime(port, 'list-conflicts'); await renderConflicts(Array.isArray(response?.items) ? response.items : []); const metadata = await sendRuntime(port, 'sync-status'); const value = metadata?.metadata; if (syncMetadata && value) syncMetadata.textContent = `Pending changes: ${value.pendingChanges ?? 0} · Last sync: ${value.lastSyncAt ?? 'never'}`; } catch { /* optional on older background */ } };
   const sync = async () => { setSync('syncing'); try { const response = await sendRuntime(port, 'sync'); setSync(response?.status === 'conflict' ? 'conflict' : response?.status === 'error' ? 'error' : 'synced', response?.error); await renderConflicts(response?.conflicts ?? []); } catch (error) { setSync('error', String(error)); } };
   root.querySelector<HTMLButtonElement>('#sync-now')?.addEventListener('click', () => { void sync(); });
   void loadConflicts();

@@ -25,7 +25,7 @@ export function popupRuntimeMessage(action: RuntimeAction, payload?: unknown): R
     'update-existing': 'lumamark-update-existing', 'copy-existing': 'lumamark-copy-existing',
     update: 'lumamark-update', delete: 'lumamark-delete', restore: 'lumamark-restore',
     favorite: 'lumamark-favorite', sync: 'lumamark-sync', 'sync-configure': 'lumamark-sync-configure',
-    export: 'lumamark-export', import: 'lumamark-import', 'list-conflicts': 'lumamark-list-conflicts', 'resolve-conflict': 'lumamark-resolve-conflict', 'collection-create': 'lumamark-collection-create', 'collection-delete': 'lumamark-collection-delete',
+    export: 'lumamark-export', import: 'lumamark-import', 'list-conflicts': 'lumamark-list-conflicts', 'resolve-conflict': 'lumamark-resolve-conflict', 'collection-create': 'lumamark-collection-create', 'collection-delete': 'lumamark-collection-delete', 'collection-restore': 'lumamark-collection-restore', 'sync-status': 'lumamark-sync-status',
   };
   return { type: runtimeTypes[action], ...(payload === undefined ? {} : { payload }) };
 }
