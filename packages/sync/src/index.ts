@@ -2,6 +2,7 @@ import {
   Bookmark,
   BookmarkRepository,
   ConflictRecord,
+  Collection,
   CURRENT_SCHEMA_VERSION,
   SyncMetadata,
 } from '../../domain/src/index';
@@ -12,7 +13,7 @@ export interface SyncManifest {
   generatedAt: string;
   deviceId: string;
   bookmarks: Bookmark[];
-  collections: unknown[];
+  collections: Collection[];
 }
 
 export interface RemoteSnapshot {
@@ -26,6 +27,9 @@ export interface WebDavClient {
 }
 
 export interface SyncRepository extends BookmarkRepository {
+  /** Collection persistence is optional for legacy repositories; sync carries all available collections. */
+  listCollections?: () => Promise<Collection[]>;
+  putCollection?: (collection: Collection) => Promise<void>;
   getSyncMetadata(): Promise<SyncMetadata>;
   setSyncMetadata(metadata: SyncMetadata): Promise<void>;
   putConflict(conflict: ConflictRecord): Promise<void>;
@@ -48,14 +52,14 @@ function changedSince(bookmark: Bookmark, lastSyncAt?: string): boolean {
   return !lastSyncAt || bookmark.updatedAt > lastSyncAt;
 }
 
-function manifestFor(deviceId: string, bookmarks: Bookmark[], now = new Date().toISOString()): SyncManifest {
+function manifestFor(deviceId: string, bookmarks: Bookmark[], collections: Collection[], now = new Date().toISOString()): SyncManifest {
   return {
     format: 'lumamark-sync',
     schemaVersion: CURRENT_SCHEMA_VERSION,
     generatedAt: now,
     deviceId,
     bookmarks,
-    collections: [],
+    collections,
   };
 }
 
@@ -71,13 +75,22 @@ export class WebDavSyncEngine {
     await this.repository.setSyncMetadata(syncing);
     try {
       const local = await this.repository.list({ includeDeleted: true });
+      const localCollections = await this.repository.listCollections?.() ?? [];
       const remoteSnapshot = await this.client.read();
       const remote = remoteSnapshot.manifest?.bookmarks ?? [];
+      const remoteCollections = remoteSnapshot.manifest?.collections ?? [];
       const byId = new Map(local.map((item) => [item.id, item]));
       const remoteById = new Map(remote.map((item) => [item.id, item]));
       const merged = new Map<string, Bookmark>();
       const conflicts: ConflictRecord[] = [];
       const ids = new Set([...byId.keys(), ...remoteById.keys()]);
+      const mergedCollections = new Map<string, Collection>(localCollections.map((item) => [item.id, item]));
+      for (const collection of remoteCollections) {
+        if (!mergedCollections.has(collection.id)) {
+          mergedCollections.set(collection.id, collection);
+          await this.repository.putCollection?.(collection);
+        }
+      }
 
       for (const id of ids) {
         const localItem = byId.get(id);
@@ -120,7 +133,7 @@ export class WebDavSyncEngine {
       }
 
       const now = new Date().toISOString();
-      const manifest = manifestFor(before.deviceId, [...merged.values()], now);
+      const manifest = manifestFor(before.deviceId, [...merged.values()], [...mergedCollections.values()], now);
       if (!conflicts.length) {
         const written = await this.client.write(manifest, remoteSnapshot.etag);
         const metadata: SyncMetadata = {
@@ -146,6 +159,7 @@ export class WebDavSyncEngine {
       await this.repository.setSyncMetadata({
         ...before,
         status: 'error',
+        autoSync: false,
         error: message,
       });
       return { status: 'error', mergedCount: 0, conflicts: [], error: message };

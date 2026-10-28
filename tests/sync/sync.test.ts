@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Bookmark, BookmarkRepository, SyncMetadata } from '../../packages/domain/src/index';
+import { Bookmark, BookmarkRepository, Collection, SyncMetadata } from '../../packages/domain/src/index';
 import { SyncRepository, SyncManifest, WebDavClient, WebDavSyncEngine } from '../../packages/sync/src/index';
 
 function bookmark(id: string, title: string, revision = 1, updatedAt = '2024-01-01T00:00:00.000Z'): Bookmark {
@@ -19,6 +19,7 @@ function bookmark(id: string, title: string, revision = 1, updatedAt = '2024-01-
 
 class MemoryRepository implements SyncRepository {
   public values = new Map<string, Bookmark>();
+  public collections = new Map<string, Collection>();
   public conflicts: any[] = [];
   public metadata: SyncMetadata = { key: 'sync', deviceId: 'device-a', status: 'idle', pendingChanges: 0, autoSync: false };
   async list(): Promise<Bookmark[]> { return [...this.values.values()]; }
@@ -26,6 +27,8 @@ class MemoryRepository implements SyncRepository {
   async findByUrl(url: string): Promise<Bookmark | undefined> { return [...this.values.values()].find((item) => item.url === url); }
   async put(value: Bookmark): Promise<void> { this.values.set(value.id, value); }
   async remove(id: string): Promise<void> { this.values.delete(id); }
+  async listCollections(): Promise<Collection[]> { return [...this.collections.values()]; }
+  async putCollection(value: Collection): Promise<void> { this.collections.set(value.id, value); }
   async getSyncMetadata(): Promise<SyncMetadata> { return this.metadata; }
   async setSyncMetadata(value: SyncMetadata): Promise<void> { this.metadata = value; }
   async putConflict(value: any): Promise<void> { this.conflicts.push(value); }
@@ -40,28 +43,37 @@ class MemoryClient implements WebDavClient {
 }
 
 describe('WebDavSyncEngine', () => {
+  const collection = (id: string, name: string): Collection => ({
+    id, name, position: 0, createdAt: '2024-01-01T00:00:00.000Z', updatedAt: '2024-01-01T00:00:00.000Z', revision: 1,
+  });
+
   it('uploads local changes and imports remote-only records', async () => {
     const repository = new MemoryRepository();
     await repository.put(bookmark('local', 'Local'));
+    await repository.putCollection(collection('local-folder', 'Local folder'));
     const client = new MemoryClient();
     client.snapshot.manifest = {
       format: 'lumamark-sync', schemaVersion: 1, generatedAt: '2024-01-01T00:00:00.000Z', deviceId: 'device-b',
-      bookmarks: [bookmark('remote', 'Remote')], collections: [],
+      bookmarks: [bookmark('remote', 'Remote')], collections: [collection('remote-folder', 'Remote folder')],
     };
     const result = await new WebDavSyncEngine(repository, client).sync();
     expect(result.status).toBe('idle');
     expect((await repository.list()).map((item) => item.id).sort()).toEqual(['local', 'remote']);
     expect(client.snapshot.manifest?.bookmarks).toHaveLength(2);
+    expect(client.snapshot.manifest?.collections.map((item) => item.id).sort()).toEqual(['local-folder', 'remote-folder']);
+    expect((await repository.listCollections()).map((item) => item.id)).toContain('remote-folder');
   });
 
   it('keeps local data and reports errors when WebDAV fails', async () => {
     const repository = new MemoryRepository();
+    repository.metadata.autoSync = true;
     await repository.put(bookmark('local', 'Local'));
     const client = new MemoryClient();
     client.fail = true;
     const result = await new WebDavSyncEngine(repository, client).sync();
     expect(result.status).toBe('error');
     expect(repository.metadata.status).toBe('error');
+    expect(repository.metadata.autoSync).toBe(false);
     expect(await repository.findById('local')).toBeTruthy();
   });
 
