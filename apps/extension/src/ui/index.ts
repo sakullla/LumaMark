@@ -75,6 +75,7 @@ export function renderBookmarkCard(bookmark: Bookmark): string {
   const tags = bookmark.tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join('');
   const favoriteLabel = bookmark.favorite ? 'Remove from favorites' : 'Add to favorites';
   return `<article class="bookmark-card" data-bookmark-id="${escapeHtml(bookmark.id)}">` +
+    `<label class="bookmark-select"><input type="checkbox" data-select-bookmark="${escapeHtml(bookmark.id)}" aria-label="Select ${escapeHtml(bookmark.title)}"></label>` +
     `<a class="bookmark-title" href="${escapeHtml(bookmark.url)}" target="_blank" rel="noreferrer">${escapeHtml(bookmark.title)}</a>` +
     `<p class="bookmark-domain">${escapeHtml(bookmark.domain)}</p>` +
     (bookmark.notes ? `<p class="bookmark-notes">${escapeHtml(bookmark.notes)}</p>` : '') +
@@ -96,7 +97,7 @@ export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character] ?? character));
 }
 
-export type RuntimeAction = 'save' | 'undo' | 'open-library' | 'list' | 'update-existing' | 'copy-existing' | 'sync';
+export type RuntimeAction = 'save' | 'undo' | 'open-library' | 'list' | 'list-collections' | 'update-existing' | 'copy-existing' | 'update' | 'delete' | 'restore' | 'favorite' | 'sync' | 'sync-configure' | 'export' | 'import';
 
 export interface RuntimeMessage { type: `lumamark-${RuntimeAction}`; payload?: unknown }
 
@@ -105,7 +106,7 @@ export function popupDocument(): string {
 }
 
 export function libraryDocument(collections: Collection[] = []): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>LumaMark Library</title></head><body><main class="library-shell"><header><h1>Bookmark library</h1><p id="sync-status" role="status">Local data is available offline.</p></header><form id="filters" aria-label="Search and filter bookmarks"><label for="search">Search title, URL, tags, or notes</label><input id="search" name="text" type="search" autocomplete="off"><label for="collection">Collection</label><select id="collection" name="collectionId"><option value="">All collections</option>${collectionOptions(collections)}</select><label for="tag">Tag</label><input id="tag" name="tag" type="search"><label for="domain">Domain</label><input id="domain" name="domain" type="search"><label for="from">Saved after</label><input id="from" name="from" type="date"><label for="to">Saved before</label><input id="to" name="to" type="date"><label><input id="favorite" name="favoriteOnly" type="checkbox"> Favorites only</label><button type="reset">Clear filters</button></form><nav class="view-switcher" aria-label="View"><button type="button" data-view="grid">Grid</button><button type="button" data-view="list" aria-pressed="true">List</button><button type="button" data-view="compact">Compact</button></nav><section id="results" class="bookmark-view bookmark-view-list" aria-live="polite"><p class="loading-state" role="status">Loading bookmarks…</p></section><a href="settings.html">Settings, import and export</a></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>LumaMark Library</title></head><body><main class="library-shell"><header><h1>Bookmark library</h1><p id="sync-status" role="status">Local data is available offline.</p></header><form id="filters" aria-label="Search and filter bookmarks"><label for="search">Search title, URL, tags, or notes</label><input id="search" name="text" type="search" autocomplete="off"><label for="collection">Collection</label><select id="collection" name="collectionId"><option value="">All collections</option>${collectionOptions(collections)}</select><label for="tag">Tag</label><input id="tag" name="tag" type="search"><label for="domain">Domain</label><input id="domain" name="domain" type="search"><label for="from">Saved after</label><input id="from" name="from" type="date"><label for="to">Saved before</label><input id="to" name="to" type="date"><label><input id="favorite" name="favoriteOnly" type="checkbox"> Favorites only</label><button type="reset">Clear filters</button></form><div class="batch-actions" role="group" aria-label="Batch actions"><button type="button" id="select-all">Select all</button><button type="button" id="batch-delete">Delete selected</button><button type="button" id="batch-move">Move selected</button></div><nav class="view-switcher" aria-label="View"><button type="button" data-view="grid">Grid</button><button type="button" data-view="list" aria-pressed="true">List</button><button type="button" data-view="compact">Compact</button></nav><section id="results" class="bookmark-view bookmark-view-list" aria-live="polite"><p class="loading-state" role="status">Loading bookmarks…</p></section><a href="settings.html">Settings, import and export</a></main></body></html>`;
 }
 
 export function settingsDocument(): string {
