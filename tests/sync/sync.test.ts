@@ -47,7 +47,7 @@ class MemoryClient implements WebDavClient {
   public notFound = false;
   async read() {
     if (this.fail) throw new Error('network unavailable');
-    if (this.notFound) throw Object.assign(new Error('not found'), { status: 404 });
+    if (this.notFound) throw new Error('WebDAV read failed (404)');
     return this.snapshot;
   }
   async write(manifest: SyncManifest, etag?: string) { if (this.fail) throw new Error('remote is read-only'); this.snapshot = { manifest, etag: etag ?? 'etag-1' }; return { etag: 'etag-2' }; }
@@ -128,6 +128,24 @@ describe('WebDavSyncEngine', () => {
     expect((await repository.listConflicts()).find((item) => item.id === resolved.id)).toBeUndefined();
     expect(repository.metadata.status).toBe('idle');
     expect(repository.metadata.pendingChanges).toBe(0);
+  });
+
+  it('does not recreate a conflict after resolving the local choice', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put(bookmark('same', 'Local', 2, '2024-01-02T00:00:00.000Z'));
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync', schemaVersion: 1, generatedAt: '2024-01-02T00:00:00.000Z', deviceId: 'device-b',
+      bookmarks: [bookmark('same', 'Remote', 2, '2024-01-03T00:00:00.000Z')], collections: [],
+    };
+    const engine = new WebDavSyncEngine(repository, client);
+    await engine.sync();
+    await engine.resolveConflict(repository.conflicts[0].id, 'local');
+    const result = await engine.sync();
+    expect(result.status).toBe('idle');
+    expect(result.conflicts).toEqual([]);
+    expect(client.snapshot.manifest?.bookmarks[0].title).toBe('Local');
   });
 
   it('initializes a missing remote manifest on the first sync', async () => {

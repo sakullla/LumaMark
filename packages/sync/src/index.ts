@@ -88,12 +88,17 @@ export class WebDavSyncEngine {
     const selected = resolution === 'local' ? conflict.local : resolution === 'remote' ? conflict.remote : merged;
     if (!selected || selected.id !== conflict.bookmarkId) throw new Error('Merged bookmark is required for this conflict');
     await this.repository.put(selected);
-    const resolved: ConflictRecord = { ...conflict, resolvedAt: new Date().toISOString(), resolution };
+    const resolvedAt = new Date().toISOString();
+    const syncBaseline = [resolvedAt, conflict.local.updatedAt, conflict.remote.updatedAt, selected.updatedAt].sort().at(-1)!;
+    const resolved: ConflictRecord = { ...conflict, resolvedAt, resolution };
     await this.repository.putConflict(resolved);
     const metadata = await this.repository.getSyncMetadata();
     await this.repository.setSyncMetadata({
       ...metadata,
       status: 'idle',
+      // Establish a new sync baseline so the selected version is not
+      // considered a second simultaneous edit on the next sync.
+      lastSyncAt: syncBaseline,
       pendingChanges: Math.max(0, metadata.pendingChanges - 1),
       error: undefined,
     });
@@ -113,7 +118,9 @@ export class WebDavSyncEngine {
       } catch (error) {
         // A missing WebDAV resource is the normal first-sync state. Treat it
         // as an empty remote manifest so local data can initialize the file.
-        if ((error as { status?: number }).status !== 404) throw error;
+        const status = (error as { status?: number }).status;
+        const message = error instanceof Error ? error.message : String(error);
+        if (status !== 404 && !/\b404\b|not found/i.test(message)) throw error;
         remoteSnapshot = {};
       }
       const remote = remoteSnapshot.manifest?.bookmarks ?? [];
