@@ -55,9 +55,9 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
     const url = api.runtime?.getURL?.('library.html') ?? 'library.html';
     await api.tabs.create?.({ url });
   };
-  const save = async () => {
+  const save = async (options: { collectionId?: string; tags?: string[]; notes?: string } = {}) => {
     const page = await captureActivePage(api);
-    const result = await service.save(page, 'existing');
+    const result = await service.save({ ...page, collectionId: options.collectionId, tags: options.tags, notes: options.notes }, 'existing');
     lastUndo = result.kind === 'saved'
       ? async () => { await service.remove(result.bookmark.id); }
       : async () => undefined;
@@ -93,7 +93,8 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
   api.runtime?.onMessage?.addListener((message: unknown, _sender: unknown, sendResponse) => {
     const type = typeof message === 'object' && message !== null && 'type' in message
       ? (message as { type?: string }).type : undefined;
-    if (type === 'lumamark-save') { void save().then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
+    const payload = (message as { payload?: any }).payload ?? {};
+    if (type === 'lumamark-save') { void save(payload).then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
     if (type === 'lumamark-open-library') { void openLibrary().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
     if (type === 'lumamark-undo') { void lastUndo().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
     if (type === 'lumamark-list') {
@@ -101,8 +102,27 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
       void repository.list({ includeDeleted: payload?.includeDeleted ?? false, text: payload?.text }).then((items) => sendResponse({ ok: true, items }));
       return true;
     }
-    const payload = (message as { payload?: any }).payload ?? {};
     if (type === 'lumamark-list-collections') { void repository.listCollections().then((items) => sendResponse({ ok: true, items })); return true; }
+    if (type === 'lumamark-collection-create') {
+      const now = new Date().toISOString();
+      const collection: Collection = { id: crypto.randomUUID(), name: String(payload.name ?? '').trim() || 'New collection', position: Date.now(), createdAt: now, updatedAt: now, revision: 1 };
+      void repository.putCollection(collection).then(() => sendResponse({ ok: true, item: collection })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
+    }
+    if (type === 'lumamark-collection-delete') {
+      void repository.listCollections().then(async (items) => {
+        const current = items.find((item) => item.id === payload.id); if (!current) throw new Error('Collection not found');
+        const deleted = { ...current, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), revision: current.revision + 1 };
+        await repository.putCollection(deleted); return deleted;
+      }).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
+    }
+    if (type === 'lumamark-list-conflicts') { void repository.listConflicts().then((items) => sendResponse({ ok: true, items })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
+    if (type === 'lumamark-resolve-conflict') {
+      void (async () => {
+        const config = syncConfig ?? await loadSyncConfig(); if (!config?.url) throw new Error('WebDAV is not configured');
+        const engine = new WebDavSyncEngine(repository, webDavClient(config));
+        return engine.resolveConflict(String(payload.id), payload.resolution, payload.merged);
+      })().then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
+    }
     if (type === 'lumamark-favorite') {
       void (async () => {
         const current = await repository.findById(payload.id);

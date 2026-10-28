@@ -25,7 +25,7 @@ export function popupRuntimeMessage(action: RuntimeAction, payload?: unknown): R
     'update-existing': 'lumamark-update-existing', 'copy-existing': 'lumamark-copy-existing',
     update: 'lumamark-update', delete: 'lumamark-delete', restore: 'lumamark-restore',
     favorite: 'lumamark-favorite', sync: 'lumamark-sync', 'sync-configure': 'lumamark-sync-configure',
-    export: 'lumamark-export', import: 'lumamark-import',
+    export: 'lumamark-export', import: 'lumamark-import', 'list-conflicts': 'lumamark-list-conflicts', 'resolve-conflict': 'lumamark-resolve-conflict', 'collection-create': 'lumamark-collection-create', 'collection-delete': 'lumamark-collection-delete',
   };
   return { type: runtimeTypes[action], ...(payload === undefined ? {} : { payload }) };
 }
@@ -61,12 +61,17 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
   root.querySelector<HTMLButtonElement>('#save')?.addEventListener('click', async () => {
     setStatus(popupStatus('saving'));
     try {
-      const result = await sendRuntime(port, 'save');
+      const tags = (root.querySelector<HTMLInputElement>('#save-tags')?.value ?? '').split(',').map((tag) => tag.trim()).filter(Boolean);
+      const result = await sendRuntime(port, 'save', { collectionId: root.querySelector<HTMLInputElement>('#save-collection')?.value.trim() || undefined, tags, notes: root.querySelector<HTMLTextAreaElement>('#save-notes')?.value ?? '' });
       if (undo) undo.disabled = result?.kind !== 'saved';
       setStatus(result?.kind === 'existing' ? popupStatus('existing') : popupStatus('saved'));
+      const existingActions = root.querySelector<HTMLElement>('#existing-actions'); if (existingActions) existingActions.hidden = result?.kind !== 'existing';
       await refresh();
     } catch (error) { setStatus(popupStatus('error', String(error))); }
   });
+  root.querySelector<HTMLButtonElement>('#open-existing')?.addEventListener('click', () => { void sendRuntime(port, 'open-library'); });
+  root.querySelector<HTMLButtonElement>('#update-existing')?.addEventListener('click', () => { void sendRuntime(port, 'update-existing'); });
+  root.querySelector<HTMLButtonElement>('#copy-existing')?.addEventListener('click', () => { void sendRuntime(port, 'copy-existing'); });
   undo?.addEventListener('click', async () => {
     await sendRuntime(port, 'undo'); undo.disabled = true; setStatus(popupStatus('undone')); await refresh();
   });

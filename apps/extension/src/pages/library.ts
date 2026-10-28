@@ -32,6 +32,8 @@ export function mountLibrary(root: ParentNode = document, port: RuntimePort = (g
       try {
         const collections = await sendRuntime(port, 'list-collections');
         state.collections = Array.isArray(collections?.items) ? collections.items : state.collections;
+        const select = root.querySelector<HTMLSelectElement>('#collection');
+        if (select) select.innerHTML = '<option value="">All collections</option>' + state.collections.filter((item) => !item.deletedAt).map((item) => `<option value="${item.id}">${item.name}</option>`).join('');
       } catch { /* old background versions may not expose collections */ }
       render();
     } catch (error) { if (status()) status()!.textContent = `Unable to load bookmarks. ${String(error)}`; }
@@ -89,6 +91,14 @@ export function mountLibrary(root: ParentNode = document, port: RuntimePort = (g
     const ids = [...root.querySelectorAll<HTMLInputElement>('[data-select-bookmark]:checked')].map((box) => box.dataset.selectBookmark).filter(Boolean);
     const collectionId = globalThis.prompt?.('Move to collection ID', '') ?? ''; if (!collectionId) return;
     await sendRuntime(port, 'update', { ids, update: { collectionId } }); await load();
+  });
+  root.querySelector<HTMLButtonElement>('#create-collection')?.addEventListener('click', async () => {
+    const name = root.querySelector<HTMLInputElement>('#new-collection')?.value.trim(); if (!name) return;
+    await sendRuntime(port, 'collection-create', { name }); await load();
+  });
+  root.querySelector<HTMLButtonElement>('#delete-collection')?.addEventListener('click', async () => {
+    const id = root.querySelector<HTMLSelectElement>('#collection')?.value; if (!id || !globalThis.confirm?.('Delete this collection? Bookmarks can be restored.')) return;
+    await sendRuntime(port, 'collection-delete', { id }); await load();
   });
   void load();
 }

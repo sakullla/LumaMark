@@ -14,6 +14,7 @@ export function settingsStatusMessage(status: SettingsStatus, detail = ''): stri
 export function mountSettings(root: ParentNode = document, port: RuntimePort = (globalThis as any).browser?.runtime ?? (globalThis as any).chrome?.runtime): void {
   const syncStatus = root.querySelector<HTMLElement>('#sync-status');
   const dataStatus = root.querySelector<HTMLElement>('#data-status');
+  const conflicts = root.querySelector<HTMLElement>('#conflicts');
   const importAction = root.querySelector<HTMLSelectElement>('#import-action');
   const setSync = (status: SettingsStatus, detail = '') => { if (syncStatus) syncStatus.textContent = settingsStatusMessage(status, detail); };
   root.querySelector<HTMLFormElement>('#sync-form')?.addEventListener('submit', async (event) => {
@@ -22,8 +23,15 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = (
     try { await sendRuntime(port, 'sync-configure', { url: data.get('webdav-url'), path: data.get('webdav-path'), username: data.get('webdav-user'), password: data.get('webdav-password'), autoSync: data.has('auto-sync') }); setSync('idle', 'Settings saved locally.'); }
     catch (error) { setSync('error', String(error)); }
   });
-  const sync = async () => { setSync('syncing'); try { const response = await sendRuntime(port, 'sync'); setSync(response?.status === 'conflict' ? 'conflict' : response?.status === 'error' ? 'error' : 'synced', response?.error); } catch (error) { setSync('error', String(error)); } };
+  const renderConflicts = async (items: any[] = []) => {
+    if (!conflicts) return;
+    conflicts.innerHTML = items.length ? `<h3>Conflicts requiring a choice</h3>${items.map((item) => `<article data-conflict-id="${item.id}"><strong>${item.local?.title ?? item.bookmarkId}</strong><p>Fields: ${(item.fields ?? []).join(', ')}</p><button type="button" data-resolution="local">Keep local</button><button type="button" data-resolution="remote">Keep remote</button><button type="button" data-resolution="merged">Use merged</button></article>`).join('')}` : '';
+    conflicts.querySelectorAll<HTMLButtonElement>('[data-resolution]').forEach((button) => button.addEventListener('click', async () => { const card = button.closest<HTMLElement>('[data-conflict-id]'); if (!card) return; await sendRuntime(port, 'resolve-conflict', { id: card.dataset.conflictId, resolution: button.dataset.resolution }); await loadConflicts(); }));
+  };
+  const loadConflicts = async () => { try { const response = await sendRuntime(port, 'list-conflicts'); await renderConflicts(Array.isArray(response?.items) ? response.items : []); } catch { /* optional on older background */ } };
+  const sync = async () => { setSync('syncing'); try { const response = await sendRuntime(port, 'sync'); setSync(response?.status === 'conflict' ? 'conflict' : response?.status === 'error' ? 'error' : 'synced', response?.error); await renderConflicts(response?.conflicts ?? []); } catch (error) { setSync('error', String(error)); } };
   root.querySelector<HTMLButtonElement>('#sync-now')?.addEventListener('click', () => { void sync(); });
+  void loadConflicts();
   const importFile = (accept: string, format: string) => {
     const input = document.createElement('input'); input.type = 'file'; input.accept = accept;
     input.addEventListener('change', async () => { const file = input.files?.[0]; if (!file) return; try { const response = await sendRuntime(port, 'import', { format, content: await file.text(), action: importAction?.value ?? 'skip' }); const issues = Array.isArray(response?.issues) ? response.issues : []; if (dataStatus) dataStatus.textContent = issues.length ? `Import complete with ${issues.length} skipped or duplicate item(s).` : 'Import complete.'; } catch (error) { if (dataStatus) dataStatus.textContent = `Import failed. ${String(error)}`; } });
