@@ -66,6 +66,8 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
   let drag: { kind: 'bookmark' | 'folder'; id: string } | undefined;
   let layingOut = false;
   const liftedMenus = new Map<HTMLElement, { parent: HTMLElement; next: ChildNode | null; anchor: HTMLElement }>();
+  const liftedTooltips = new Map<HTMLElement, { parent: HTMLElement; next: ChildNode | null; anchor: HTMLElement }>();
+  let hoveredAnchor: HTMLElement | undefined;
 
   const bar = () => root.querySelector<HTMLElement>('#bookmark-bar');
   const note = () => root.querySelector<HTMLElement>('#search-note');
@@ -90,7 +92,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     for (const menu of [...liftedMenus.keys()]) restoreLiftedMenu(menu);
   };
 
-  // The bar clips its row. An open menu is attached to #bar-region, which does not.
+  // The bar clips its row. Open menus and full-title tips attach to #bar-region, which does not.
   const positionLiftedMenu = (menu: HTMLElement, anchor: HTMLElement, layer: HTMLElement) => {
     if (typeof anchor.getBoundingClientRect !== 'function' || typeof layer.getBoundingClientRect !== 'function') return;
     const anchorRect = anchor.getBoundingClientRect();
@@ -151,11 +153,99 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     liftMenu(menu, button);
   };
 
+  const restoreLiftedTooltip = (tooltip: HTMLElement) => {
+    const home = liftedTooltips.get(tooltip);
+    if (!home) return;
+    tooltip.style.position = '';
+    tooltip.style.top = '';
+    tooltip.style.left = '';
+    tooltip.style.zIndex = '';
+    tooltip.style.display = '';
+    tooltip.style.pointerEvents = '';
+    tooltip.style.maxWidth = '';
+    if (home.parent.isConnected) {
+      if (home.next && home.next.parentNode === home.parent) home.parent.insertBefore(tooltip, home.next);
+      else home.parent.append(tooltip);
+    } else tooltip.remove();
+    liftedTooltips.delete(tooltip);
+  };
+
+  const restoreLiftedTooltips = () => {
+    for (const tooltip of [...liftedTooltips.keys()]) restoreLiftedTooltip(tooltip);
+  };
+
+  const tooltipGap = (layer: HTMLElement): number => {
+    if (typeof getComputedStyle !== 'function') return 3.2;
+    const root = layer.ownerDocument?.documentElement;
+    if (!root) return 3.2;
+    const font = px(getComputedStyle(root).fontSize);
+    return font > 0 ? font * 0.2 : 3.2;
+  };
+
+  const positionLiftedTooltip = (tooltip: HTMLElement, anchor: HTMLElement, layer: HTMLElement) => {
+    tooltip.style.position = 'absolute';
+    tooltip.style.zIndex = '4';
+    tooltip.style.display = 'block';
+    tooltip.style.pointerEvents = 'none';
+    tooltip.style.maxWidth = 'none';
+    if (typeof anchor.getBoundingClientRect !== 'function' || typeof layer.getBoundingClientRect !== 'function') return;
+    const anchorRect = anchor.getBoundingClientRect();
+    const layerRect = layer.getBoundingClientRect();
+    tooltip.style.top = `${anchorRect.bottom - layerRect.top + tooltipGap(layer)}px`;
+    tooltip.style.left = `${anchorRect.left - layerRect.left}px`;
+  };
+
+  const tooltipOf = (anchor: HTMLElement): HTMLElement | undefined => {
+    const inline = [...anchor.children].find((child) => child.classList.contains('item-tooltip'));
+    if (inline) return inline as HTMLElement;
+    for (const [tooltip, home] of liftedTooltips) {
+      if (home.anchor === anchor) return tooltip;
+    }
+    return undefined;
+  };
+
+  const showItemTooltip = (anchor: HTMLElement) => {
+    const tooltip = tooltipOf(anchor);
+    const layer = menuLayer();
+    if (!tooltip || !layer || !anchor.isConnected) return;
+    if (!liftedTooltips.has(tooltip) && !tooltip.closest('.bookmark-bar, .bar-items')) return;
+    if (liftedTooltips.has(tooltip)) {
+      positionLiftedTooltip(tooltip, anchor, layer);
+      return;
+    }
+    const parent = tooltip.parentElement;
+    if (!parent || parent === layer) return;
+    liftedTooltips.set(tooltip, { parent, next: tooltip.nextSibling, anchor });
+    layer.append(tooltip);
+    positionLiftedTooltip(tooltip, anchor, layer);
+  };
+
+  const focusedBarItem = (): HTMLElement | undefined => {
+    if (typeof document === 'undefined') return undefined;
+    const active = document.activeElement as HTMLElement | null;
+    if (!active || typeof active.closest !== 'function') return undefined;
+    const item = active.closest('.bar-item');
+    return item?.isConnected ? item as HTMLElement : undefined;
+  };
+
+  const syncTooltips = () => {
+    if (hoveredAnchor && !hoveredAnchor.isConnected) hoveredAnchor = undefined;
+    const wanted = new Set<HTMLElement>();
+    if (hoveredAnchor) wanted.add(hoveredAnchor);
+    const focused = focusedBarItem();
+    if (focused) wanted.add(focused);
+    for (const [tooltip, home] of [...liftedTooltips]) {
+      if (!wanted.has(home.anchor)) restoreLiftedTooltip(tooltip);
+    }
+    for (const anchor of wanted) showItemTooltip(anchor);
+  };
+
   const layoutBar = () => {
     if (layingOut) return;
     layingOut = true;
     const reopen = [...liftedMenus].filter(([menu]) => !menu.hidden).map(([menu, home]) => ({ menu, anchor: home.anchor }));
     restoreLiftedMenus();
+    restoreLiftedTooltips();
     try {
       const target = bar();
       const itemsHost = target?.querySelector<HTMLElement>('.bar-items');
@@ -190,6 +280,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
         for (const entry of reopen) {
           if (entry.menu.isConnected && !entry.menu.hidden) liftMenu(entry.menu, entry.anchor);
         }
+        syncTooltips();
       } finally {
         layingOut = false;
       }
@@ -198,6 +289,8 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
 
   const render = () => {
     restoreLiftedMenus();
+    restoreLiftedTooltips();
+    hoveredAnchor = undefined;
     const target = bar();
     const empty = root.querySelector<HTMLElement>('#bar-empty');
     if (!target) return;
@@ -282,6 +375,43 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     if (!focusRow(host, key)) return;
     if (key.startsWith('Arrow') || key === 'Home' || key === 'End') event.preventDefault();
   });
+
+  const barItemFrom = (event: Event): HTMLElement | undefined => {
+    const target = event.target as { closest?: (selector: string) => HTMLElement | null } | null;
+    if (!target || typeof target.closest !== 'function') return undefined;
+    return target.closest('.bar-item') ?? undefined;
+  };
+
+  const relatedNode = (event: Event): Node | null => (event as Event & { relatedTarget?: Node | null }).relatedTarget ?? null;
+
+  const pointerStillInside = (anchor: HTMLElement, node: Node | null): boolean => {
+    if (!node) return false;
+    if (anchor.contains(node)) return true;
+    const tooltip = tooltipOf(anchor);
+    return Boolean(tooltip && (node === tooltip || tooltip.contains(node)));
+  };
+
+  const showHovered = (event: Event) => {
+    const anchor = barItemFrom(event);
+    if (!anchor) return;
+    hoveredAnchor = anchor;
+    syncTooltips();
+  };
+
+  const hideHovered = (event: Event) => {
+    const anchor = barItemFrom(event);
+    if (!anchor || hoveredAnchor !== anchor) return;
+    if (pointerStillInside(anchor, relatedNode(event))) return;
+    hoveredAnchor = undefined;
+    syncTooltips();
+  };
+
+  menuHost?.addEventListener('mouseover', showHovered);
+  menuHost?.addEventListener('pointerover', showHovered);
+  menuHost?.addEventListener('mouseout', hideHovered);
+  menuHost?.addEventListener('pointerout', hideHovered);
+  menuHost?.addEventListener('focusin', () => { syncTooltips(); });
+  menuHost?.addEventListener('focusout', () => { syncTooltips(); });
 
   const readDrag = (event: DragEvent) => {
     if (drag) return drag;
