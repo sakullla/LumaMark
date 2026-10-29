@@ -95,6 +95,11 @@ export function barDropParent(input: { inBar: boolean; onOtherButton: boolean })
   return undefined;
 }
 
+/** A missing data-parent-id keeps the current folder. An empty attribute still means the top level. */
+export function menuParentId(attribute: string | null, current: string): string {
+  return attribute === null ? current : attribute;
+}
+
 export function buildSearchUrl(template: string, query: string): string {
   const source = template.trim() || DEFAULT_SEARCH_URL;
   const parsed = new URL(source);

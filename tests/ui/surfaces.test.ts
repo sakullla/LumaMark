@@ -27,6 +27,7 @@ import {
   dropIntent,
   hasDisplayableBookmarks,
   homeSyncPhrase,
+  menuParentId,
   nextIndex,
   planWebSearch,
   renderBarEntries,
@@ -93,6 +94,9 @@ describe('bookmark bar and shared surfaces', () => {
     expect(barDropParent({ inBar: false, onOtherButton: false })).toBe('');
     expect(barDropParent({ inBar: true, onOtherButton: true })).toBe('');
     expect(barDropParent({ inBar: true, onOtherButton: false })).toBeUndefined();
+    expect(menuParentId(null, 'bar')).toBe('bar');
+    expect(menuParentId('', 'bar')).toBe('');
+    expect(menuParentId('folder', '')).toBe('folder');
     expect(dropIntent({ kind: 'folder', start: 0, size: 100, point: 50 })).toBe('inside');
     expect(dropIntent({ kind: 'bookmark', start: 0, size: 100, point: 20 })).toBe('before');
     expect(dropIntent({ kind: 'bookmark', start: 0, size: 100, point: 80 })).toBe('after');
@@ -169,6 +173,7 @@ describe('bookmark bar and shared surfaces', () => {
       const manifest = JSON.parse(readFileSync(`apps/extension/manifest.${name}.json`, 'utf8'));
       expect(manifest.chrome_url_overrides.newtab).toBe('home.html');
       expect(manifest.permissions).not.toContain('bookmarks');
+      expect(manifest.permissions).toContain('alarms');
       if (name === 'chrome') expect(manifest.host_permissions).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*']));
     }
     const pages = ['popup.ts', 'library.ts', 'settings.ts', 'home.ts'];
@@ -178,6 +183,9 @@ describe('bookmark bar and shared surfaces', () => {
     }
     const content = readFileSync('apps/extension/src/content/index.ts', 'utf8');
     expect(content).not.toContain('bookmark-bar');
+    const home = readFileSync('apps/extension/src/pages/home.ts', 'utf8');
+    expect(home).toContain('id="overflow-menu" hidden data-parent-id="${escapeHtml(parent)}"');
+    expect(home).toContain('menuParentId(menu.getAttribute(\'data-parent-id\'), parentId)');
     const css = readFileSync('apps/extension/src/styles/main.css', 'utf8');
     expect(css).toContain('color-scheme: light');
     expect(css).toContain('prefers-color-scheme: dark');

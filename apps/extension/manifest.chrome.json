@@ -3,7 +3,7 @@
   "name": "LumaMark",
   "version": "0.1.0",
   "description": "Local-first cross-browser bookmarks",
-  "permissions": ["storage", "contextMenus", "commands", "notifications", "tabs"],
+  "permissions": ["storage", "contextMenus", "commands", "notifications", "tabs", "alarms"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "Save to LumaMark", "default_popup": "popup.html" },

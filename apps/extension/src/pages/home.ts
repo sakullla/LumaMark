@@ -7,6 +7,7 @@ import {
   dropIntent,
   hasDisplayableBookmarks,
   homeSyncPhrase,
+  menuParentId,
   nextIndex,
   planWebSearch,
   renderBarEntries,
@@ -120,7 +121,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
       ? `<div class="bar-menu other-bookmarks"><button type="button" class="bar-hit" id="other-bookmarks" aria-expanded="false">${escapeHtml(text.otherBookmarks)}</button><div class="folder-menu" hidden role="menu" data-parent-id="">${renderBarEntries(model.other, '')}</div></div>`
       : '';
     target.innerHTML = `<div class="bar-items" data-parent-id="${escapeHtml(parent)}">${renderBarEntries(model.items, parent)}</div>` +
-      `<div class="bar-menu overflow-menu" hidden><button type="button" class="bar-hit" id="overflow-button" aria-expanded="false">${escapeHtml(text.overflow)}</button><div class="folder-menu" id="overflow-menu" hidden></div></div>${other}`;
+      `<div class="bar-menu overflow-menu" hidden><button type="button" class="bar-hit" id="overflow-button" aria-expanded="false">${escapeHtml(text.overflow)}</button><div class="folder-menu" id="overflow-menu" hidden data-parent-id="${escapeHtml(parent)}"></div></div>${other}`;
     bindIconFallback(target);
     layoutBar();
   };
@@ -253,7 +254,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
         }
       } else {
         const menu = hit.closest<HTMLElement>('.folder-menu');
-        if (menu) parentId = menu.dataset.parentId ?? '';
+        if (menu) parentId = menuParentId(menu.getAttribute('data-parent-id'), parentId);
       }
     }
     const response = await sendRuntime(port, 'reorder', { kind: moving.kind, id: moving.id, parentId, beforeId });

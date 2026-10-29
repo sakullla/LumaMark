@@ -3,7 +3,7 @@
   "name": "LumaMark",
   "version": "0.1.0",
   "description": "Local-first cross-browser bookmarks",
-  "permissions": ["storage", "contextMenus", "commands", "notifications", "tabs", "<all_urls>"],
+  "permissions": ["storage", "contextMenus", "commands", "notifications", "tabs", "alarms", "<all_urls>"],
   "background": { "scripts": ["background.js"] },
   "browser_action": { "default_title": "Save to LumaMark", "default_popup": "popup.html" },
   "commands": { "save-current-page": { "suggested_key": { "default": "Alt+Shift+L" }, "description": "Save the current page to LumaMark" } },

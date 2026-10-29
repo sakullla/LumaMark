@@ -93,10 +93,12 @@ function isStoredUndo(value: unknown): value is StoredUndo {
     && item.ids.every((id) => typeof id === 'string');
 }
 
+const AUTO_SYNC_ALARM = 'lumamark-auto-sync';
+const AUTO_SYNC_PERIOD_MINUTES = 5;
+
 export function startBackground(api = resolveExtensionApi(), repository = new IndexedDbRepository()): void {
   const service = new BookmarkService(repository);
   let syncConfig: SyncConfig | undefined;
-  let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
   let memorySearchUrl = DEFAULT_SEARCH_URL;
   let undoMemory: StoredUndo[] = [];
   let undoChain: Promise<void> = Promise.resolve();
@@ -278,20 +280,35 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
     syncConfig = await repository.getSyncConfig();
     return syncConfig;
   };
-  const scheduleAutoSync = () => {
-    if (autoSyncTimer) clearTimeout(autoSyncTimer);
-    if (!syncConfig?.autoSync || !syncConfig.url) return;
-    autoSyncTimer = setTimeout(async () => {
-      if (!syncConfig?.autoSync) return;
-      const result = await new WebDavSyncEngine(repository, webDavClient(syncConfig)).sync();
-      if (result.status === 'error') {
-        syncConfig = { ...syncConfig, autoSync: false };
-        await repository.setSyncConfig(syncConfig);
-        const metadata = await repository.getSyncMetadata();
-        await repository.setSyncMetadata({ ...metadata, autoSync: false });
-      } else scheduleAutoSync();
-    }, 5 * 60 * 1000);
+  const runAutoSync = async () => {
+    const config = syncConfig ?? await loadSyncConfig();
+    if (!config?.autoSync || !config.url) {
+      await api.alarms?.clear(AUTO_SYNC_ALARM);
+      return;
+    }
+    const result = await new WebDavSyncEngine(repository, webDavClient(config)).sync();
+    if (result.status !== 'error') return;
+    syncConfig = { ...config, autoSync: false };
+    await repository.setSyncConfig(syncConfig);
+    const metadata = await repository.getSyncMetadata();
+    await repository.setSyncMetadata({ ...metadata, autoSync: false });
+    await api.alarms?.clear(AUTO_SYNC_ALARM);
   };
+  const scheduleAutoSync = async () => {
+    const alarms = api.alarms;
+    if (!alarms?.create || !alarms.clear) return;
+    if (!syncConfig?.autoSync || !syncConfig.url) {
+      await alarms.clear(AUTO_SYNC_ALARM);
+      return;
+    }
+    // Replacing an existing alarm restarts the five-minute period, so a service-worker wake must leave it alone.
+    const existing = alarms.get ? await alarms.get(AUTO_SYNC_ALARM) : undefined;
+    if (existing) return;
+    await alarms.create(AUTO_SYNC_ALARM, { periodInMinutes: AUTO_SYNC_PERIOD_MINUTES });
+  };
+  api.alarms?.onAlarm?.addListener((alarm) => {
+    if (alarm.name === AUTO_SYNC_ALARM) void runAutoSync();
+  });
   void loadSyncConfig().then(scheduleAutoSync);
   registerSaveEntrypoints(api, saveFromMenu, copyFor(languageFromApi(api)).contextSave);
 
@@ -489,7 +506,7 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
       await repository.setSyncConfig(syncConfig);
       const metadata = await repository.getSyncMetadata();
       await repository.setSyncMetadata({ ...metadata, autoSync: syncConfig.autoSync });
-      scheduleAutoSync();
+      await scheduleAutoSync();
       return { ok: true, autoSync: syncConfig.autoSync };
     });
     if (type === 'lumamark-sync-configure') return accept(async () => {
@@ -504,7 +521,7 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
         await repository.setSyncConfig(syncConfig);
         const metadata = await repository.getSyncMetadata();
         await repository.setSyncMetadata({ ...metadata, autoSync: false, status: 'idle', error: undefined });
-        scheduleAutoSync();
+        await scheduleAutoSync();
         return { ok: true, probe: 'empty', autoSync: false };
       }
       const probe = await probeWebDav({ url, path, username, password });
@@ -518,7 +535,7 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
         status: probe.kind === 'ok' ? 'idle' : probe.kind === 'unreachable' ? 'offline' : 'error',
         error: probe.kind === 'ok' ? undefined : probe.kind,
       });
-      scheduleAutoSync();
+      await scheduleAutoSync();
       return { ok: true, probe: probe.kind, autoSync, status: probe.status };
     });
     if (type === 'lumamark-sync') return accept(async () => {

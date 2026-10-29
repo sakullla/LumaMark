@@ -71,6 +71,17 @@ export interface ExtensionI18n {
   getUILanguage?: () => string;
 }
 
+export interface ExtensionAlarm {
+  name: string;
+}
+
+export interface ExtensionAlarms {
+  create(name: string, alarmInfo: { delayInMinutes?: number; periodInMinutes?: number }): void | Promise<void>;
+  get?(name: string): Promise<ExtensionAlarm | undefined>;
+  clear(name: string): void | Promise<boolean | void>;
+  onAlarm?: { addListener(listener: (alarm: ExtensionAlarm) => void): void };
+}
+
 export interface WebExtensionApi {
   tabs: ExtensionTabs;
   notifications?: ExtensionNotifications;
@@ -79,6 +90,7 @@ export interface WebExtensionApi {
   runtime?: ExtensionRuntime;
   storage?: ExtensionStorage;
   i18n?: ExtensionI18n;
+  alarms?: ExtensionAlarms;
 }
 
 export interface SaveActionHandlers {
@@ -169,6 +181,15 @@ export interface SaveNoticeCopy {
 
 let noticeSequence = 0;
 
+// Chrome rejects a basic notification that has no iconUrl, which used to fail the save after the bookmark was written.
+const NOTIFICATION_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+function notificationIconUrl(api: WebExtensionApi): string {
+  const resource = api.runtime?.getURL?.('assets/icon.png');
+  if (resource && /^(chrome-extension:|moz-extension:|safari-web-extension:)/.test(resource)) return resource;
+  return NOTIFICATION_ICON_DATA_URL;
+}
+
 export async function notifyMessage(
   api: WebExtensionApi,
   title: string,
@@ -177,12 +198,17 @@ export async function notifyMessage(
 ): Promise<string | undefined> {
   if (!api.notifications?.create) return undefined;
   const notificationId = `lumamark-${Date.now()}-${noticeSequence++}`;
-  await api.notifications.create(notificationId, {
-    type: 'basic',
-    title,
-    message,
-    buttons: buttons.map((button) => ({ title: button.title })),
-  });
+  try {
+    await api.notifications.create(notificationId, {
+      type: 'basic',
+      iconUrl: notificationIconUrl(api),
+      title,
+      message,
+      buttons: buttons.map((button) => ({ title: button.title })),
+    });
+  } catch {
+    return undefined;
+  }
   if (buttons.length) {
     api.notifications.onButtonClicked?.addListener((id, index) => {
       if (id !== notificationId) return;

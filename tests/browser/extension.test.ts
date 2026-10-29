@@ -59,7 +59,10 @@ describe('browser adapter', () => {
     let onButton: ((id: string, index: number) => void) | undefined;
     const api = { tabs: { query: vi.fn() }, notifications: { create: vi.fn().mockResolvedValue('id'), onButtonClicked: { addListener: (listener: (id: string, index: number) => void) => { onButton = listener; } } } };
     await notifySaveResult(api, saved, { undo: () => { clicked.push('undo'); } });
-    expect(api.notifications.create).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ buttons: [{ title: 'Open library' }, { title: 'Undo' }] }));
+    expect(api.notifications.create).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      iconUrl: expect.stringMatching(/^data:image\/|^chrome-extension:|^moz-extension:|^safari-web-extension:/),
+      buttons: [{ title: 'Open library' }, { title: 'Undo' }],
+    }));
     onButton?.(api.notifications.create.mock.calls[0][0], 1);
     expect(clicked).toEqual(['undo']);
   });
@@ -73,9 +76,14 @@ describe('browser adapter', () => {
       const manifest = JSON.parse(readFileSync(`dist/extension/${target}/manifest.json`, 'utf8'));
       expect(manifest.chrome_url_overrides.newtab).toBe('home.html');
       expect(manifest.permissions).not.toContain('bookmarks');
+      expect(manifest.permissions).toContain('alarms');
       if (target === 'chrome' || target === 'safari') expect(manifest.host_permissions).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*']));
-      expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('lumamark-save-page');
-      expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('return true');
+      const background = readFileSync(`dist/extension/${target}/background.js`, 'utf8');
+      expect(background).toContain('lumamark-save-page');
+      expect(background).toContain('return true');
+      expect(background).toContain('lumamark-auto-sync');
+      expect(background).toContain('periodInMinutes');
+      expect(existsSync(`dist/extension/${target}/assets/icon.png`)).toBe(true);
       const content = readFileSync(`dist/extension/${target}/content.js`, 'utf8');
       expect(content).toContain('lumamark-page-metadata');
       expect(content).toContain('lumamark-link-context');
@@ -429,6 +437,101 @@ describe('browser adapter', () => {
       expect(await send({ type: 'lumamark-set-auto-sync', payload: { autoSync: false } })).toMatchObject({ ok: true, autoSync: false });
       expect(calls).toHaveLength(beforeOff);
     } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('returns the saved bookmark and undo token when notification creation fails', async () => {
+    const repository = new IndexedDbRepository(`lumamark-notice-${crypto.randomUUID()}`);
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    const api = {
+      i18n: { getUILanguage: () => 'en' },
+      tabs: { query: vi.fn().mockResolvedValue([{ url: 'https://saved.example/a', title: 'Saved page' }]), create: vi.fn() },
+      runtime: {
+        getURL: (path: string) => `chrome-extension://lumamark/${path}`,
+        onMessage: { addListener: (callback: typeof listener) => { listener = callback; } },
+      },
+      notifications: {
+        create: vi.fn().mockRejectedValue(new Error('Unable to download all specified images.')),
+        onButtonClicked: { addListener: vi.fn() },
+      },
+    };
+    startBackground(api, repository);
+    const response = await new Promise<any>((resolve) => {
+      listener?.({ type: 'lumamark-save' }, {}, resolve);
+    });
+    expect(response).toMatchObject({
+      ok: true,
+      undoToken: expect.any(String),
+      result: { kind: 'saved', bookmark: { title: 'Saved page' } },
+    });
+    expect(api.notifications.create).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      iconUrl: 'chrome-extension://lumamark/assets/icon.png',
+    }));
+    expect(api.notifications.create.mock.calls.map((call) => call[1]?.title)).not.toContain('Not saved');
+    expect(await repository.findByUrl('https://saved.example/a')).toMatchObject({ title: 'Saved page' });
+  });
+
+  it('schedules automatic sync with an alarm and does not keep a timer', async () => {
+    const repository = new IndexedDbRepository(`lumamark-alarm-${crypto.randomUUID()}`);
+    await repository.setSyncConfig({
+      key: 'sync-config',
+      url: 'https://dav.example/sync',
+      path: 'lumamark.json',
+      username: 'me',
+      password: 'pw',
+      autoSync: true,
+    });
+    const stored = new Map<string, { name: string; periodInMinutes?: number }>();
+    let onAlarm: ((alarm: { name: string }) => void) | undefined;
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    let failSync = false;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (failSync) throw new Error('Failed to fetch');
+      if ((init?.method ?? 'GET') === 'PUT') return new Response('{}', { status: 200, headers: { etag: 'W/"1"' } });
+      return new Response('missing', { status: 404 });
+    });
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const alarms = {
+        create: vi.fn(async (name: string, info: { periodInMinutes?: number }) => {
+          stored.set(name, { name, periodInMinutes: info.periodInMinutes });
+        }),
+        get: vi.fn(async (name: string) => stored.get(name)),
+        clear: vi.fn(async (name: string) => {
+          stored.delete(name);
+          return true;
+        }),
+        onAlarm: { addListener: (callback: typeof onAlarm) => { onAlarm = callback; } },
+      };
+      startBackground({
+        i18n: { getUILanguage: () => 'en' },
+        tabs: { query: vi.fn().mockResolvedValue([]), create: vi.fn() },
+        alarms,
+        runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } },
+      }, repository);
+      await vi.waitFor(() => expect(alarms.create).toHaveBeenCalledWith('lumamark-auto-sync', { periodInMinutes: 5 }));
+      expect(timeouts.mock.calls.map((call) => call[1])).not.toContain(5 * 60 * 1000);
+      const send = (message: unknown) => new Promise<any>((resolve) => { listener?.(message, {}, resolve); });
+      expect(await send({ type: 'lumamark-set-auto-sync', payload: { autoSync: true } })).toMatchObject({ ok: true, autoSync: true });
+      expect(alarms.create).toHaveBeenCalledTimes(1);
+      onAlarm?.({ name: 'lumamark-auto-sync' });
+      await vi.waitFor(() => expect(fetchMock.mock.calls.some((call) => (call[1] as RequestInit | undefined)?.method === 'PUT')).toBe(true));
+      expect((await repository.getSyncConfig())?.autoSync).toBe(true);
+      expect(stored.has('lumamark-auto-sync')).toBe(true);
+      failSync = true;
+      const callsBeforeFailure = fetchMock.mock.calls.length;
+      onAlarm?.({ name: 'lumamark-auto-sync' });
+      await vi.waitFor(async () => {
+        expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeFailure);
+        expect((await repository.getSyncConfig())?.autoSync).toBe(false);
+      });
+      expect(stored.has('lumamark-auto-sync')).toBe(false);
+      expect(await send({ type: 'lumamark-set-auto-sync', payload: { autoSync: false } })).toMatchObject({ ok: true, autoSync: false });
+      expect(alarms.create).toHaveBeenCalledTimes(1);
+    } finally {
+      timeouts.mockRestore();
       vi.unstubAllGlobals();
     }
   });
