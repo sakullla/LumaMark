@@ -411,5 +411,116 @@ describe('WebDavSyncEngine', () => {
     expect((await other.listCollections())[0].deletedAt).toBe('2024-01-02T00:00:00.000Z');
     expect((await other.findById('gone'))?.title).toBe('Gone');
   });
+
+  it('keeps other conflicts on both sides after one choice is resolved and synced', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put(bookmark('one', 'Local one', 2, '2024-01-02T00:00:00.000Z', 1));
+    await repository.put(bookmark('two', 'Local two', 2, '2024-01-02T00:00:00.000Z', 3));
+    await repository.put(bookmark('three', 'Local three', 2, '2024-01-02T00:00:00.000Z', 2));
+    const remoteOne = bookmark('one', 'Remote one', 5, '2024-01-03T00:00:00.000Z', 9);
+    const remoteTwo = bookmark('two', 'Remote two', 4, '2024-01-03T00:00:00.000Z', 8);
+    const remoteThree = bookmark('three', 'Remote three', 2, '2024-01-03T00:00:00.000Z', 7);
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync',
+      schemaVersion: 2,
+      generatedAt: '2024-01-03T00:00:00.000Z',
+      deviceId: 'device-b',
+      bookmarks: [remoteOne, remoteTwo, remoteThree],
+      collections: [],
+    };
+    const engine = new WebDavSyncEngine(repository, client);
+    const first = await engine.sync();
+    expect(first.status).toBe('conflict');
+    expect(first.conflicts.map((item) => item.bookmarkId).sort()).toEqual(['one', 'three', 'two']);
+
+    const oneConflict = repository.conflicts.find((item) => item.bookmarkId === 'one');
+    await engine.resolveConflict(oneConflict.id, 'local');
+    expect(repository.metadata.lastSyncAt).toBe('2024-01-01T00:00:00.000Z');
+    expect(await repository.findById('one')).toMatchObject({ title: 'Local one', position: 1, revision: 6 });
+
+    const second = await engine.sync();
+    expect(second.status).toBe('conflict');
+    expect(second.conflicts.map((item) => item.bookmarkId).sort()).toEqual(['three', 'two']);
+    expect(repository.metadata.pendingChanges).toBe(2);
+    expect(repository.metadata.lastSyncAt).toBe('2024-01-01T00:00:00.000Z');
+    expect(await repository.findById('one')).toMatchObject({ title: 'Local one', position: 1, revision: 6 });
+    expect(await repository.findById('two')).toMatchObject({ title: 'Local two', position: 3, revision: 2 });
+    expect(await repository.findById('three')).toMatchObject({ title: 'Local three', position: 2, revision: 2 });
+    expect(client.snapshot.manifest?.bookmarks.find((item) => item.id === 'one')).toMatchObject({ title: 'Remote one', position: 9 });
+    expect(client.snapshot.manifest?.bookmarks.find((item) => item.id === 'two')).toMatchObject({ title: 'Remote two', position: 8 });
+    expect(client.snapshot.manifest?.bookmarks.find((item) => item.id === 'three')).toMatchObject({ title: 'Remote three', position: 7 });
+
+    await engine.resolveConflict(repository.conflicts.find((item) => item.bookmarkId === 'two').id, 'local');
+    await engine.resolveConflict(repository.conflicts.find((item) => item.bookmarkId === 'three').id, 'local');
+    const published = await engine.sync();
+    expect(published.status).toBe('idle');
+    expect(published.conflicts).toEqual([]);
+    expect(await repository.findById('one')).toMatchObject({ title: 'Local one', position: 1, revision: 6 });
+    expect(await repository.findById('two')).toMatchObject({ title: 'Local two', position: 3, revision: 5 });
+    expect(await repository.findById('three')).toMatchObject({ title: 'Local three', position: 2, revision: 3 });
+    expect(client.snapshot.manifest?.schemaVersion).toBe(2);
+    expect(client.snapshot.manifest?.bookmarks.find((item) => item.id === 'one')).toMatchObject({ title: 'Local one', position: 1, revision: 6 });
+    expect(client.snapshot.manifest?.bookmarks.find((item) => item.id === 'two')).toMatchObject({ title: 'Local two', position: 3, revision: 5 });
+    expect(client.snapshot.manifest?.bookmarks.find((item) => item.id === 'three')).toMatchObject({ title: 'Local three', position: 2, revision: 3 });
+  });
+
+  it('keeps a later dual edit in conflict when another conflict is resolved', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put(bookmark('one', 'Local one', 2, '2024-01-02T00:00:00.000Z', 1));
+    await repository.put(bookmark('two', 'Same two', 1, '2024-01-01T00:00:00.000Z', 1));
+    const remoteOne = bookmark('one', 'Remote one', 5, '2024-01-03T00:00:00.000Z', 9);
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync',
+      schemaVersion: 2,
+      generatedAt: '2024-01-03T00:00:00.000Z',
+      deviceId: 'device-b',
+      bookmarks: [remoteOne, bookmark('two', 'Same two', 1, '2024-01-01T00:00:00.000Z', 1)],
+      collections: [],
+    };
+    const engine = new WebDavSyncEngine(repository, client);
+    const first = await engine.sync();
+    expect(first.conflicts.map((item) => item.bookmarkId)).toEqual(['one']);
+
+    await repository.put(bookmark('two', 'Local two', 2, '2024-01-04T00:00:00.000Z', 4));
+    client.snapshot.manifest = {
+      ...client.snapshot.manifest,
+      bookmarks: [remoteOne, bookmark('two', 'Remote two', 5, '2024-01-04T00:00:00.000Z', 9)],
+    };
+    await engine.resolveConflict(repository.conflicts.find((item) => item.bookmarkId === 'one').id, 'local');
+    const second = await engine.sync();
+    expect(second.status).toBe('conflict');
+    expect(second.conflicts.map((item) => item.bookmarkId)).toEqual(['two']);
+    expect(await repository.findById('one')).toMatchObject({ title: 'Local one', position: 1, revision: 6 });
+    expect(await repository.findById('two')).toMatchObject({ title: 'Local two', position: 4, revision: 2 });
+    expect(client.snapshot.manifest?.bookmarks.find((item) => item.id === 'two')).toMatchObject({ title: 'Remote two', position: 9, revision: 5 });
+    expect((await repository.listConflicts()).map((item) => item.bookmarkId)).toEqual(['two']);
+  });
+
+  it('does not let a newer revision replace a recorded conflict when the baseline is ahead', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put(bookmark('same', 'Local', 2, '2024-01-02T00:00:00.000Z', 1));
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync',
+      schemaVersion: 2,
+      generatedAt: '2024-01-03T00:00:00.000Z',
+      deviceId: 'device-b',
+      bookmarks: [bookmark('same', 'Remote', 5, '2024-01-03T00:00:00.000Z', 9)],
+      collections: [],
+    };
+    const engine = new WebDavSyncEngine(repository, client);
+    expect((await engine.sync()).status).toBe('conflict');
+    repository.metadata.lastSyncAt = '2026-01-01T00:00:00.000Z';
+    const second = await engine.sync();
+    expect(second.status).toBe('conflict');
+    expect(second.conflicts).toHaveLength(1);
+    expect(await repository.findById('same')).toMatchObject({ title: 'Local', position: 1, revision: 2 });
+    expect(client.snapshot.manifest?.bookmarks[0]).toMatchObject({ title: 'Remote', position: 9, revision: 5 });
+  });
 });
 

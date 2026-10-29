@@ -114,6 +114,25 @@ function manifestFor(deviceId: string, bookmarks: Bookmark[], collections: Colle
   };
 }
 
+function conflictIndexes(conflicts: readonly ConflictRecord[]): {
+  unresolvedByBookmark: Map<string, ConflictRecord>;
+  resolvedByBookmark: Map<string, ConflictRecord>;
+} {
+  const unresolvedByBookmark = new Map<string, ConflictRecord>();
+  const resolvedByBookmark = new Map<string, ConflictRecord>();
+  for (const conflict of conflicts) {
+    if (!conflict.resolvedAt) {
+      unresolvedByBookmark.set(conflict.bookmarkId, conflict);
+      continue;
+    }
+    const previous = resolvedByBookmark.get(conflict.bookmarkId);
+    if (!previous || conflict.resolvedAt >= (previous.resolvedAt ?? '')) {
+      resolvedByBookmark.set(conflict.bookmarkId, conflict);
+    }
+  }
+  return { unresolvedByBookmark, resolvedByBookmark };
+}
+
 export class WebDavSyncEngine {
   public constructor(
     private readonly repository: SyncRepository,
@@ -127,8 +146,8 @@ export class WebDavSyncEngine {
     const chosen = resolution === 'local' ? conflict.local : resolution === 'remote' ? conflict.remote : merged;
     if (!chosen || chosen.id !== conflict.bookmarkId) throw new Error('Merged bookmark is required for this conflict');
     const resolvedAt = new Date().toISOString();
-    // Once both timestamps fall behind lastSyncAt, merge keeps the higher revision.
-    // Lift the choice above both sides and stamp it with that same baseline.
+    // Lift the choice above both revisions so the next sync can publish it.
+    // Do not move lastSyncAt: that baseline still covers every unresolved edit.
     const selected: Bookmark = {
       ...chosen,
       updatedAt: resolvedAt,
@@ -142,7 +161,6 @@ export class WebDavSyncEngine {
     await this.repository.setSyncMetadata({
       ...metadata,
       status: remainingConflicts.length ? 'conflict' : 'idle',
-      lastSyncAt: resolvedAt,
       pendingChanges: remainingConflicts.length,
       error: undefined,
     });
@@ -173,7 +191,7 @@ export class WebDavSyncEngine {
       const remoteById = new Map(remote.map((item) => [item.id, item]));
       const merged = new Map<string, Bookmark>();
       const conflicts: ConflictRecord[] = [];
-      const unresolvedByBookmark = new Map((await this.repository.listConflicts()).map((item) => [item.bookmarkId, item]));
+      const { unresolvedByBookmark, resolvedByBookmark } = conflictIndexes(await this.repository.listConflicts(true));
       const ids = new Set([...byId.keys(), ...remoteById.keys()]);
       const mergedCollections = new Map<string, Collection>(localCollections.map((item) => [item.id, item]));
       for (const collection of remoteCollections) {
@@ -215,10 +233,14 @@ export class WebDavSyncEngine {
 
         const localChanged = changedSince(localItem, before.lastSyncAt);
         const remoteChanged = changedSince(remoteItem, before.lastSyncAt);
-        if (localChanged && remoteChanged) {
-          const existingConflict = unresolvedByBookmark.get(id);
-          if (existingConflict) {
-            conflicts.push(existingConflict);
+        const unresolved = unresolvedByBookmark.get(id);
+        const resolved = resolvedByBookmark.get(id);
+        // The stored remote snapshot is the version already considered. A matching
+        // remote is the choice waiting to be published, not a new conflict.
+        const remoteMatchesResolved = resolved !== undefined && equalBookmark(remoteItem, resolved.remote);
+        if (unresolved || (localChanged && remoteChanged && !remoteMatchesResolved)) {
+          if (unresolved) {
+            conflicts.push(unresolved);
             merged.set(id, localItem);
             continue;
           }
