@@ -30,6 +30,22 @@ export interface SaveMenuInfo {
   pageUrl?: string;
 }
 
+export function sameLinkUrl(left: string, right: string): boolean {
+  try {
+    return new URL(left).href === new URL(right).href;
+  } catch {
+    return left === right;
+  }
+}
+
+/** Prefer the browser link text, then text supplied by the page. An empty page title means the URL. */
+export function titleForSavedLink(info: SaveMenuInfo, hintedTitle?: string): string {
+  const linkText = info.linkText?.trim();
+  if (linkText) return linkText;
+  if (hintedTitle !== undefined) return hintedTitle.trim() || info.linkUrl || '';
+  return info.selectionText?.trim() || info.linkUrl || '';
+}
+
 export interface ExtensionContextMenus {
   create(properties: { id: string; title: string; contexts: string[] }): void | Promise<void>;
   onClicked?: { addListener(listener: (info: SaveMenuInfo, tab?: ActiveTab) => void): void };
@@ -158,8 +174,8 @@ export async function notifyMessage(
   title: string,
   message: string,
   buttons: Array<{ title: string; onClick?: () => void }> = [],
-): Promise<void> {
-  if (!api.notifications?.create) return;
+): Promise<string | undefined> {
+  if (!api.notifications?.create) return undefined;
   const notificationId = `lumamark-${Date.now()}-${noticeSequence++}`;
   await api.notifications.create(notificationId, {
     type: 'basic',
@@ -167,17 +183,19 @@ export async function notifyMessage(
     message,
     buttons: buttons.map((button) => ({ title: button.title })),
   });
-  if (!buttons.length) return;
-  api.notifications.onButtonClicked?.addListener((id, index) => {
-    if (id !== notificationId) return;
-    buttons[index]?.onClick?.();
-  });
+  if (buttons.length) {
+    api.notifications.onButtonClicked?.addListener((id, index) => {
+      if (id !== notificationId) return;
+      buttons[index]?.onClick?.();
+    });
+  }
+  return notificationId;
 }
 
-export async function notifySaveResult(api: WebExtensionApi, result: SaveBookmarkResult, handlers: SaveActionHandlers = {}, copy: SaveNoticeCopy = {}): Promise<void> {
+export async function notifySaveResult(api: WebExtensionApi, result: SaveBookmarkResult, handlers: SaveActionHandlers = {}, copy: SaveNoticeCopy = {}): Promise<string | undefined> {
   const actions = saveActionsForResult(result).map((action) => ({ ...action, title: copy.actionTitles?.[action.id] ?? action.title }));
   const saved = result.kind === 'saved';
-  await notifyMessage(
+  return notifyMessage(
     api,
     saved ? (copy.savedTitle ?? 'Bookmark saved') : (copy.existingTitle ?? 'Already saved'),
     saved ? (copy.savedMessage ?? 'Saved. Open the library or undo this save.') : (copy.existingMessage ?? 'Already saved. Choose an action.'),

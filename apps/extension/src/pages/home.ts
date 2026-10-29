@@ -1,6 +1,8 @@
 import type { Bookmark, Collection } from '../../../../packages/domain/src/index';
 import { homeDocument, renderSyncLine, searchBookmarks } from '../ui/index';
 import {
+  barDropParent,
+  barItemBudget,
   buildBar,
   dropIntent,
   hasDisplayableBookmarks,
@@ -26,6 +28,33 @@ function globalRuntime(): RuntimePort {
 
 type PageRoot = ParentNode & EventTarget;
 
+function px(value: string | undefined): number {
+  const parsed = Number.parseFloat(value ?? '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function gapPx(value: string | undefined): number {
+  if (!value || value === 'normal') return 4;
+  return px(value);
+}
+
+function naturalWidth(element: HTMLElement | null): number {
+  if (!element) return 0;
+  const previous = element.style.flexShrink;
+  element.style.flexShrink = '0';
+  const width = element.getBoundingClientRect().width;
+  element.style.flexShrink = previous;
+  return width;
+}
+
+function overflowButtonWidth(wrap: HTMLElement): number {
+  const wasHidden = wrap.hidden;
+  if (wasHidden) wrap.hidden = false;
+  const width = naturalWidth(wrap.querySelector<HTMLElement>('#overflow-button'));
+  if (wasHidden) wrap.hidden = true;
+  return width;
+}
+
 export function mountHome(root: PageRoot = document, port: RuntimePort = globalRuntime()): void {
   const language = detectUiLanguage();
   const text = copyFor(language);
@@ -34,28 +63,47 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
   let searchUrl = 'https://www.google.com/search?q={query}';
   let model: BarModel = { items: [], other: [] };
   let drag: { kind: 'bookmark' | 'folder'; id: string } | undefined;
+  let layingOut = false;
 
   const bar = () => root.querySelector<HTMLElement>('#bookmark-bar');
   const note = () => root.querySelector<HTMLElement>('#search-note');
   const results = () => root.querySelector<HTMLElement>('#search-results');
 
   const layoutBar = () => {
-    const target = bar();
-    const itemsHost = target?.querySelector<HTMLElement>('.bar-items');
-    const overflowMenu = target?.querySelector<HTMLElement>('#overflow-menu');
-    const overflowWrap = target?.querySelector<HTMLElement>('.overflow-menu');
-    if (!target || !itemsHost || !overflowMenu || !overflowWrap) return;
-    [...overflowMenu.children].forEach((child) => itemsHost.append(child));
-    const items = [...itemsHost.querySelectorAll<HTMLElement>(':scope > .bar-item')];
-    items.forEach((item) => { item.hidden = false; });
-    if (target.clientWidth <= 0) { overflowWrap.hidden = true; return; }
-    const widths = items.map((item) => item.getBoundingClientRect().width);
-    const otherWidth = target.querySelector<HTMLElement>('.other-bookmarks')?.getBoundingClientRect().width ?? 0;
-    let visible = visibleItemCount(widths, target.clientWidth, otherWidth);
-    if (visible < items.length) visible = visibleItemCount(widths, target.clientWidth, otherWidth + 72);
-    overflowMenu.replaceChildren();
-    items.slice(visible).forEach((item) => overflowMenu.append(item));
-    overflowWrap.hidden = visible >= items.length;
+    if (layingOut) return;
+    layingOut = true;
+    try {
+      const target = bar();
+      const itemsHost = target?.querySelector<HTMLElement>('.bar-items');
+      const overflowMenu = target?.querySelector<HTMLElement>('#overflow-menu');
+      const overflowWrap = target?.querySelector<HTMLElement>('.overflow-menu');
+      if (!target || !itemsHost || !overflowMenu || !overflowWrap) return;
+      [...overflowMenu.children].forEach((child) => itemsHost.append(child));
+      const items = [...itemsHost.querySelectorAll<HTMLElement>(':scope > .bar-item')];
+      items.forEach((item) => { item.hidden = false; });
+      if (target.clientWidth <= 0) { overflowWrap.hidden = true; return; }
+      const style = typeof getComputedStyle === 'function' ? getComputedStyle(target) : undefined;
+      const hostStyle = typeof getComputedStyle === 'function' ? getComputedStyle(itemsHost) : undefined;
+      const padding = style ? px(style.paddingLeft) + px(style.paddingRight) : 0;
+      const barGap = gapPx(style?.columnGap || style?.gap);
+      const itemGap = gapPx(hostStyle?.columnGap || hostStyle?.gap);
+      const widths = items.map((item) => naturalWidth(item));
+      const otherWidth = naturalWidth(target.querySelector<HTMLElement>('.other-bookmarks'));
+      const fit = (overflowWidth: number) => visibleItemCount(widths, barItemBudget({
+        clientWidth: target.clientWidth,
+        padding,
+        otherWidth,
+        overflowWidth,
+        barGap,
+      }), 0, itemGap);
+      let visible = fit(0);
+      if (visible < items.length) visible = fit(overflowButtonWidth(overflowWrap));
+      overflowMenu.replaceChildren();
+      items.slice(visible).forEach((item) => overflowMenu.append(item));
+      overflowWrap.hidden = visible >= items.length;
+    } finally {
+      layingOut = false;
+    }
   };
 
   const render = () => {
@@ -118,13 +166,13 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
       toggleMenu(target);
       return;
     }
-    if (key === 'ArrowDown' && target.matches('.folder > .bar-hit')) {
+    if (key === 'ArrowDown' && target.matches('.folder > .bar-hit, #other-bookmarks, #overflow-button')) {
       event.preventDefault();
       const menu = target.parentElement?.querySelector<HTMLElement>(':scope > .folder-menu');
       if (!menu) return;
       menu.hidden = false;
       target.setAttribute('aria-expanded', 'true');
-      if (!focusRow(menu, 'ArrowDown')) menu.querySelector<HTMLElement>('a, button')?.focus();
+      menu.querySelector<HTMLElement>(':scope > a.bar-item, :scope > .folder > .bar-hit')?.focus();
       return;
     }
     const menu = target.closest<HTMLElement>('.folder-menu');
@@ -173,15 +221,20 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     drag = undefined;
     if (!moving) return;
     dragEvent.preventDefault();
-    const point = dragEvent.target as HTMLElement;
+    const raw = dragEvent.target as { closest?: HTMLElement['closest']; parentElement?: HTMLElement | null } | null;
+    const hit = (typeof raw?.closest === 'function' ? raw : raw?.parentElement) as HTMLElement | null;
+    if (!hit?.closest) return;
     let parentId = model.toolbarId ?? '';
     let beforeId: string | undefined;
-    // Dropping outside the bar moves the item to the top level. Other bookmarks
-    // stays hidden until that top-level item exists.
-    if (!point.closest('#bookmark-bar') || point.closest('#other-bookmarks, .other-bookmarks')) parentId = '';
+    const topLevel = barDropParent({
+      inBar: Boolean(hit.closest('#bookmark-bar')),
+      onOtherButton: Boolean(hit.closest('#other-bookmarks')),
+    });
+    if (topLevel === '') parentId = '';
     else {
-      const item = point.closest<HTMLElement>('[data-kind][data-id]');
-      if (item && item.dataset.id !== moving.id) {
+      const item = hit.closest<HTMLElement>('[data-kind][data-id]');
+      if (item?.dataset.id === moving.id) return;
+      if (item) {
         const rect = item.getBoundingClientRect();
         const horizontal = !item.closest('.folder-menu');
         const intent = dropIntent({
@@ -198,6 +251,9 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
           if (intent === 'before') beforeId = item.dataset.id;
           if (intent === 'after') beforeId = siblings[index + 1]?.dataset.id;
         }
+      } else {
+        const menu = hit.closest<HTMLElement>('.folder-menu');
+        if (menu) parentId = menu.dataset.parentId ?? '';
       }
     }
     const response = await sendRuntime(port, 'reorder', { kind: moving.kind, id: moving.id, parentId, beforeId });

@@ -1,13 +1,11 @@
 import type { Bookmark, Collection } from '../../../../packages/domain/src/index';
 import {
-  bookmarksInFolder,
   collectionOptions,
   defaultLibraryFilters,
   libraryDocument,
   libraryFailureMessage,
-  renderBookmarkCard,
-  renderEmptyState,
   renderFolderTree,
+  renderLibraryResults,
   viewClass,
   type LibraryFilters,
 } from '../ui/index';
@@ -20,8 +18,7 @@ import { sendRuntime, type RuntimePort } from './popup';
 export interface LibraryRenderState { bookmarks: Bookmark[]; collections: Collection[]; filters: LibraryFilters; folderId: string | null }
 
 export function renderLibrary(state: LibraryRenderState, language = detectUiLanguage()): string {
-  const filtered = bookmarksInFolder(state.bookmarks, state.folderId, state.filters);
-  const body = filtered.length ? filtered.map((bookmark) => renderBookmarkCard(bookmark, language)).join('') : renderEmptyState(state.filters, language);
+  const body = renderLibraryResults(state.bookmarks, state.folderId, state.filters, language);
   return `<section id="results" class="${viewClass(state.filters.view)}" aria-live="polite">${body}</section>`;
 }
 
@@ -62,7 +59,11 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     button.textContent = text.undo;
     button.addEventListener('click', async () => {
       button.disabled = true;
-      await restore();
+      const result = await restore() as { ok?: boolean } | undefined;
+      if (!result?.ok) {
+        button.disabled = false;
+        return;
+      }
       target.textContent = text.restored;
       await load();
     });
@@ -100,9 +101,8 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (editorSelect) editorSelect.innerHTML = `<option value="">${text.topLevel}</option>${collectionOptions(collections, editorFolder, language)}`;
     const target = results();
     if (!target) return;
-    const visible = bookmarksInFolder(bookmarks, folderId, filters);
     target.className = viewClass(filters.view);
-    target.innerHTML = visible.length ? visible.map((bookmark) => renderBookmarkCard(bookmark, language)).join('') : renderEmptyState({ ...filters, collectionId: '' }, language);
+    target.innerHTML = renderLibraryResults(bookmarks, folderId, filters, language);
     bindIconFallback(target);
     const batch = root.querySelector<HTMLElement>('#batch-actions');
     if (batch) batch.hidden = selectedIds().length === 0;
@@ -252,7 +252,10 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
       const accepted = await ask(text.confirmDeleteBookmark);
       if (!accepted) return;
       const response = await sendRuntime(port, 'delete', { ids: [id] });
-      if (response?.ok) showUndo(text.deletedUndo, () => sendRuntime(port, 'undo'));
+      if (response?.ok && typeof response.undoToken === 'string') {
+        const token = response.undoToken;
+        showUndo(text.deletedUndo, () => sendRuntime(port, 'undo', { token }));
+      }
       await load();
     }
   });
@@ -276,7 +279,10 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     const accepted = await ask(text.confirmDeleteBookmark);
     if (!accepted) return;
     const response = await sendRuntime(port, 'delete', { ids });
-    if (response?.ok) showUndo(text.deletedUndo, () => sendRuntime(port, 'undo'));
+    if (response?.ok && typeof response.undoToken === 'string') {
+      const token = response.undoToken;
+      showUndo(text.deletedUndo, () => sendRuntime(port, 'undo', { token }));
+    }
     await load();
   });
   root.querySelector<HTMLButtonElement>('#batch-move')?.addEventListener('click', async () => {

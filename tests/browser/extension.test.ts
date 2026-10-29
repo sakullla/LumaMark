@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import 'fake-indexeddb/auto';
-import { captureActivePage, notifySaveResult, resolveExtensionApi, saveActionsForResult, saveActivePage } from '../../packages/browser/src/index';
-import { readPageMetadata } from '../../apps/extension/src/content/index';
+import { captureActivePage, notifySaveResult, resolveExtensionApi, saveActionsForResult, saveActivePage, titleForSavedLink } from '../../packages/browser/src/index';
+import { readLinkTarget, readPageMetadata } from '../../apps/extension/src/content/index';
 import { BookmarkService, makeBookmark, type Bookmark, type Collection } from '../../packages/domain/src/index';
 import { planImport } from '../../packages/import-export/src/index';
 import { applyImportPlan, startBackground } from '../../apps/extension/src/background/index';
@@ -33,6 +33,16 @@ describe('browser adapter', () => {
   it('reads metadata from a favicon link', () => {
     const metadata = readPageMetadata({ title: 'Example', querySelector: () => ({ href: 'https://example.test/icon.png' }) as HTMLLinkElement });
     expect(metadata).toEqual({ type: 'lumamark-page-metadata', title: 'Example', faviconUrl: 'https://example.test/icon.png' });
+  });
+
+  it('reads the visible text of an http(s) link and ignores other addresses', () => {
+    const anchor = { href: 'https://link.example/a', innerText: ' Docs ', textContent: 'Docs' };
+    expect(readLinkTarget({ closest: () => anchor })).toEqual({ url: 'https://link.example/a', title: 'Docs' });
+    expect(readLinkTarget({ closest: () => ({ href: 'https://link.example/b', innerText: '', textContent: '' }) })).toEqual({ url: 'https://link.example/b', title: '' });
+    expect(readLinkTarget({ closest: () => ({ href: 'chrome://extensions', textContent: 'Extensions' }) })).toBeUndefined();
+    expect(titleForSavedLink({ menuItemId: 'lumamark-save-page', linkUrl: 'https://link.example/a' }, 'Docs')).toBe('Docs');
+    expect(titleForSavedLink({ menuItemId: 'lumamark-save-page', linkUrl: 'https://link.example/b', selectionText: 'Selected' }, ' ')).toBe('https://link.example/b');
+    expect(titleForSavedLink({ menuItemId: 'lumamark-save-page', linkUrl: 'https://link.example/a', linkText: 'Link title' }, 'Other')).toBe('Link title');
   });
 
   it('resolves browser before chrome APIs', () => {
@@ -67,6 +77,7 @@ describe('browser adapter', () => {
       expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('return true');
       const content = readFileSync(`dist/extension/${target}/content.js`, 'utf8');
       expect(content).toContain('lumamark-page-metadata');
+      expect(content).toContain('lumamark-link-context');
       expect(content).not.toContain('bookmark-bar');
       expect(readFileSync(`dist/extension/${target}/home.js`, 'utf8')).toContain('bookmark-bar');
       const popup = readFileSync(`dist/extension/${target}/popup.js`, 'utf8');
@@ -217,6 +228,82 @@ describe('browser adapter', () => {
     await vi.waitFor(() => expect(response?.unsavable).toBe(true));
     expect(await repository.list()).toHaveLength(1);
     expect(api.notifications.create).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title: 'Cannot save' }));
+  });
+
+  it('saves a link title supplied by the page when the menu has no link text', async () => {
+    const repository = new IndexedDbRepository(`lumamark-link-text-${crypto.randomUUID()}`);
+    let menuListener: ((info: { menuItemId: string; linkUrl?: string; selectionText?: string; pageUrl?: string }) => void) | undefined;
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    const api = {
+      i18n: { getUILanguage: () => 'en' },
+      tabs: { query: vi.fn().mockResolvedValue([{ url: 'https://page.example/current', title: 'Current page' }]), create: vi.fn() },
+      notifications: { create: vi.fn().mockResolvedValue('notice'), onButtonClicked: { addListener: vi.fn() } },
+      contextMenus: { create: vi.fn(), onClicked: { addListener: (callback: typeof menuListener) => { menuListener = callback; } } },
+      runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } },
+    };
+    startBackground(api, repository);
+    const send = (message: unknown) => new Promise<unknown>((resolve) => { listener?.(message, {}, resolve); });
+    await send({ type: 'lumamark-link-context', payload: { url: 'https://link.example/a', title: 'Docs' } });
+    menuListener?.({ menuItemId: 'lumamark-save-page', linkUrl: 'https://link.example/a', pageUrl: 'https://page.example/current' });
+    await vi.waitFor(async () => {
+      expect((await repository.findByUrl('https://link.example/a'))?.title).toBe('Docs');
+    });
+    await send({ type: 'lumamark-link-context', payload: { url: 'https://link.example/b', title: '  ' } });
+    menuListener?.({ menuItemId: 'lumamark-save-page', linkUrl: 'https://link.example/b', selectionText: 'Selected', pageUrl: 'https://page.example/current' });
+    await vi.waitFor(async () => {
+      expect((await repository.findByUrl('https://link.example/b'))?.title).toBe('https://link.example/b');
+    });
+  });
+
+  it('undoes only the recorded save or delete, including after a background restart', async () => {
+    const repository = new IndexedDbRepository(`lumamark-undo-${crypto.randomUUID()}`);
+    const kept = makeBookmark({ url: 'https://kept.example/a', title: 'Kept' });
+    await repository.put(kept);
+    const memory: Record<string, unknown> = {};
+    const storage = {
+      local: {
+        get: async (keys?: string | string[] | Record<string, unknown> | null) => (typeof keys === 'string' ? { [keys]: memory[keys] } : { ...memory }),
+        set: async (items: Record<string, unknown>) => { Object.assign(memory, items); },
+      },
+    };
+    let activeTab = { url: 'https://new.example/a', title: 'New' };
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    const api = {
+      i18n: { getUILanguage: () => 'en' },
+      tabs: { query: vi.fn().mockImplementation(async () => [activeTab]), create: vi.fn() },
+      notifications: { create: vi.fn().mockResolvedValue('notice'), onButtonClicked: { addListener: vi.fn() } },
+      storage,
+      runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } },
+    };
+    startBackground(api, repository);
+    const send = (message: unknown) => new Promise<any>((resolve) => { listener?.(message, {}, resolve); });
+    const removed = await send({ type: 'lumamark-delete', payload: { ids: [kept.id] } });
+    expect(removed.undoToken).toEqual(expect.any(String));
+    expect((await send({ type: 'lumamark-save' })).ok).toBe(true);
+    expect(await send({ type: 'lumamark-undo', payload: { token: removed.undoToken } })).toMatchObject({ ok: true });
+    expect((await repository.findById(kept.id))?.deletedAt).toBeUndefined();
+    expect((await repository.findByUrl('https://new.example/a'))?.title).toBe('New');
+    expect(await send({ type: 'lumamark-undo', payload: { token: removed.undoToken } })).toMatchObject({ ok: false });
+    expect(await send({ type: 'lumamark-undo' })).toMatchObject({ ok: false });
+
+    activeTab = { url: 'https://notice.example/a', title: 'Notice' };
+    expect((await send({ type: 'lumamark-save' })).ok).toBe(true);
+    const notificationId = api.notifications.create.mock.calls.at(-1)?.[0] as string;
+    const saved = await repository.findByUrl('https://notice.example/a');
+    expect(saved?.deletedAt).toBeUndefined();
+    const buttonListeners: Array<(id: string, index: number) => void> = [];
+    startBackground({
+      i18n: { getUILanguage: () => 'en' },
+      tabs: { query: vi.fn().mockResolvedValue([]), create: vi.fn() },
+      notifications: { create: vi.fn(), onButtonClicked: { addListener: (callback: (id: string, index: number) => void) => { buttonListeners.push(callback); } } },
+      storage,
+      runtime: { onMessage: { addListener: vi.fn() } },
+    }, repository);
+    buttonListeners[0]?.(notificationId, 1);
+    await vi.waitFor(async () => {
+      expect((await repository.findById(saved!.id))?.deletedAt).toEqual(expect.any(String));
+    });
+    expect((await repository.findById(kept.id))?.deletedAt).toBeUndefined();
   });
 
   it('rejects an invalid URL edit and a failed write without changing stored bookmarks', async () => {

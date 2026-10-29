@@ -13,12 +13,15 @@ import {
   searchBookmarks,
   settingsDocument,
   defaultLibraryFilters,
+  renderLibraryResults,
 } from '../../apps/extension/src/ui/index';
 import { mountHome } from '../../apps/extension/src/pages/home';
 import { mountLibrary } from '../../apps/extension/src/pages/library';
 import { mountPopup } from '../../apps/extension/src/pages/popup';
 import { mountSettings } from '../../apps/extension/src/pages/settings';
 import {
+  barDropParent,
+  barItemBudget,
   buildBar,
   buildSearchUrl,
   dropIntent,
@@ -83,6 +86,13 @@ describe('bookmark bar and shared surfaces', () => {
   it('keeps overflow and drag decisions independent of the page width measurement', () => {
     expect(visibleItemCount([20, 20, 20], 0)).toBe(0);
     expect(visibleItemCount([20, 20, 20], 50)).toBe(2);
+    const content = barItemBudget({ clientWidth: 200, padding: 8 });
+    expect(content).toBe(192);
+    expect(visibleItemCount([100, 96], content)).toBe(1);
+    expect(barItemBudget({ clientWidth: 200, padding: 8, otherWidth: 40, overflowWidth: 30, barGap: 4 })).toBe(114);
+    expect(barDropParent({ inBar: false, onOtherButton: false })).toBe('');
+    expect(barDropParent({ inBar: true, onOtherButton: true })).toBe('');
+    expect(barDropParent({ inBar: true, onOtherButton: false })).toBeUndefined();
     expect(dropIntent({ kind: 'folder', start: 0, size: 100, point: 50 })).toBe('inside');
     expect(dropIntent({ kind: 'bookmark', start: 0, size: 100, point: 20 })).toBe('before');
     expect(dropIntent({ kind: 'bookmark', start: 0, size: 100, point: 80 })).toBe('after');
@@ -99,6 +109,8 @@ describe('bookmark bar and shared surfaces', () => {
     const settingsZh = settingsDocument('zh');
     expect(home).toContain('LumaMark');
     expect(home).toContain('id="bookmark-bar"');
+    expect(home.indexOf('id="bookmark-bar"')).toBeLessThan(home.indexOf('class="brand"'));
+    expect(home.indexOf('id="bookmark-bar"')).toBeLessThan(home.indexOf('id="sync-line"'));
     expect(home).toContain('value="skip"');
     expect(home).toContain('value="update"');
     expect(home).toContain('value="copy"');
@@ -142,6 +154,14 @@ describe('bookmark bar and shared surfaces', () => {
     expect(bookmarksInFolder([first, second], 'bar', defaultLibraryFilters()).map((item) => item.id)).toEqual([first.id]);
     expect(searchBookmarks([first, second], 'alpha').map((item) => item.id)).toEqual([first.id]);
     expect(searchBookmarks([first, second], 'other.test').map((item) => item.id)).toEqual([second.id]);
+    const nested = makeBookmark({ url: 'https://nested.example/a', title: 'Nested', collectionId: 'child' }, now);
+    const folderEmpty = renderLibraryResults([nested], 'bar', defaultLibraryFilters());
+    expect(folderEmpty).not.toContain('No bookmarks yet');
+    expect(folderEmpty).not.toContain('Save current page');
+    expect(folderEmpty).toContain('This folder has no bookmarks.');
+    expect(renderLibraryResults([nested], 'bar', defaultLibraryFilters(), 'zh')).not.toContain('还没有书签');
+    expect(renderLibraryResults([], null, defaultLibraryFilters())).toContain('No bookmarks yet');
+    expect(renderLibraryResults([], null, defaultLibraryFilters())).toContain('Save current page');
   });
 
   it('keeps new-tab override free of the bookmarks permission and dialog functions', () => {

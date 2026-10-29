@@ -21,6 +21,8 @@ import {
   notifySaveResult,
   registerSaveEntrypoints,
   resolveExtensionApi,
+  sameLinkUrl,
+  titleForSavedLink,
   type SaveMenuInfo,
   type WebExtensionApi,
 } from '../../../../packages/browser/src/index';
@@ -73,16 +75,104 @@ export async function applyImportPlan(plan: ImportPlan, service: BookmarkService
 }
 
 const SEARCH_KEY = 'searchUrl';
+const UNDO_KEY = 'undoRecords';
+
+interface StoredUndo {
+  token: string;
+  op: 'remove' | 'restore';
+  ids: string[];
+  notificationId?: string;
+}
+
+function isStoredUndo(value: unknown): value is StoredUndo {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<StoredUndo>;
+  return (item.op === 'remove' || item.op === 'restore')
+    && typeof item.token === 'string'
+    && Array.isArray(item.ids)
+    && item.ids.every((id) => typeof id === 'string');
+}
 
 export function startBackground(api = resolveExtensionApi(), repository = new IndexedDbRepository()): void {
   const service = new BookmarkService(repository);
   let syncConfig: SyncConfig | undefined;
   let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
   let memorySearchUrl = DEFAULT_SEARCH_URL;
-  let lastUndo: () => Promise<void> = async () => undefined;
+  let undoMemory: StoredUndo[] = [];
+  let undoChain: Promise<void> = Promise.resolve();
+  const linkTitles = new Map<string, string>();
   let lastSavePage: { url: string; title?: string; faviconUrl?: string } | undefined;
   let lastSaveOptions: { collectionId?: string; tags?: string[]; notes?: string } = {};
   const notices = () => notificationCopy(languageFromApi(api));
+  const enqueueUndo = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = undoChain.then(work, work);
+    undoChain = run.then(() => undefined, () => undefined);
+    return run;
+  };
+  const readUndos = async (): Promise<StoredUndo[]> => {
+    if (api.storage?.local) {
+      try {
+        const stored = await api.storage.local.get(UNDO_KEY);
+        const value = stored?.[UNDO_KEY];
+        if (Array.isArray(value)) {
+          undoMemory = value.filter(isStoredUndo);
+          return undoMemory;
+        }
+      } catch { /* this session keeps the in-memory list */ }
+    }
+    return undoMemory;
+  };
+  const writeUndos = async (records: StoredUndo[]): Promise<void> => {
+    undoMemory = records;
+    try {
+      if (api.storage?.local) await api.storage.local.set({ [UNDO_KEY]: records });
+    } catch { /* memory still serves this session */ }
+  };
+  const rememberUndo = (record: StoredUndo) => enqueueUndo(async () => {
+    const records = (await readUndos()).filter((item) => item.token !== record.token);
+    records.push(record);
+    await writeUndos(records);
+  });
+  const performUndo = async (key: string): Promise<boolean> => {
+    if (!key) return false;
+    const record = await enqueueUndo(async () => {
+      const records = await readUndos();
+      const index = records.findIndex((item) => item.token === key || item.notificationId === key);
+      if (index < 0) return undefined;
+      const [found] = records.splice(index, 1);
+      await writeUndos(records);
+      return found;
+    });
+    if (!record) return false;
+    for (const id of record.ids) {
+      const current = await repository.findById(id);
+      if (!current) continue;
+      if (record.op === 'remove') {
+        if (!current.deletedAt) await service.remove(id);
+      } else if (current.deletedAt) {
+        await service.restore(id);
+      }
+    }
+    return true;
+  };
+  const rememberLinkTitle = (url: string, title: string) => {
+    let key = url;
+    try { key = new URL(url).href; } catch { /* keep the raw address */ }
+    linkTitles.set(key, title);
+    if (linkTitles.size <= 20) return;
+    const oldest = linkTitles.keys().next().value;
+    if (oldest) linkTitles.delete(oldest);
+  };
+  const hintedTitle = (url: string): string | undefined => {
+    for (const [savedUrl, title] of linkTitles) {
+      if (sameLinkUrl(savedUrl, url)) return title;
+    }
+    return undefined;
+  };
+  api.notifications?.onButtonClicked?.addListener((id, index) => {
+    if (index !== 1) return;
+    void performUndo(id);
+  });
   const openExtensionPage = async (page: string) => {
     const url = api.runtime?.getURL?.(page) ?? page;
     await api.tabs.create?.({ url });
@@ -136,10 +226,14 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
       }
       const result = await service.save(draft, duplicate);
       const copy = notices();
-      lastUndo = result.kind === 'saved' ? async () => { await service.remove(result.bookmark.id); } : async () => undefined;
-      await notifySaveResult(api, result, {
+      let undoToken: string | undefined;
+      if (result.kind === 'saved' && duplicate !== 'update') {
+        undoToken = crypto.randomUUID();
+        await rememberUndo({ token: undoToken, op: 'remove', ids: [result.bookmark.id] });
+      }
+      const notificationId = await notifySaveResult(api, result, {
         openLibrary: () => openExtensionPage('library.html'),
-        undo: lastUndo,
+        undo: () => { if (undoToken) void performUndo(undoToken); },
         openExisting: async () => { if (result.kind === 'existing') await api.tabs.create?.({ url: result.existing.url }); },
         updateExisting: async () => {
           if (result.kind === 'existing') await service.save({ url: input.url, title: input.title, faviconUrl: input.faviconUrl, notes: input.notes, tags: input.tags }, 'update');
@@ -151,7 +245,10 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
           await service.save({ url: input.url, title: input.title, faviconUrl: input.faviconUrl, notes: input.notes, tags: input.tags, collectionId, position }, 'copy');
         },
       }, copy);
-      return { ok: true as const, result };
+      if (undoToken && notificationId && result.kind === 'saved') {
+        await rememberUndo({ token: undoToken, op: 'remove', ids: [result.bookmark.id], notificationId });
+      }
+      return { ok: true as const, result, ...(undoToken ? { undoToken } : {}) };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (/only http|url is required/i.test(message)) {
@@ -165,8 +262,8 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
 
   const saveFromMenu = async (info?: SaveMenuInfo) => {
     if (info?.linkUrl) {
-      const title = info.linkText?.trim() || info.selectionText?.trim() || info.linkUrl;
-      await saveTarget({ url: info.linkUrl, title });
+      const hinted = hintedTitle(info.linkUrl);
+      await saveTarget({ url: info.linkUrl, title: titleForSavedLink(info, hinted) });
       return;
     }
     try {
@@ -211,6 +308,13 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
       return true;
     };
 
+    if (type === 'lumamark-link-context') {
+      const url = typeof payload.url === 'string' ? payload.url : '';
+      const title = typeof payload.title === 'string' ? payload.title : '';
+      if (url) rememberLinkTitle(url, title);
+      sendResponse({ ok: true });
+      return true;
+    }
     if (type === 'lumamark-save') return accept(async () => {
       try {
         const page = await captureActivePage(api);
@@ -246,7 +350,11 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
       await api.tabs.create?.({ url });
       return { ok: true };
     });
-    if (type === 'lumamark-undo') return accept(async () => { await lastUndo(); return { ok: true }; });
+    if (type === 'lumamark-undo') return accept(async () => {
+      const token = typeof payload.token === 'string' ? payload.token : '';
+      if (!token) return { ok: false };
+      return { ok: await performUndo(token) };
+    });
     if (type === 'lumamark-update-existing' || type === 'lumamark-copy-existing') return accept(async () => {
       if (!lastSavePage?.url) return { ok: false, unsavable: true };
       return saveTarget({
@@ -331,9 +439,9 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
       const ids = (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map(String);
       const items = [];
       for (const id of ids) items.push(await service.remove(id));
-      const removed = items.map((item) => item.id);
-      lastUndo = async () => { for (const id of removed) await service.restore(id); };
-      return { ok: true, items };
+      const undoToken = crypto.randomUUID();
+      await rememberUndo({ token: undoToken, op: 'restore', ids: items.map((item) => item.id) });
+      return { ok: true, items, undoToken };
     });
     if (type === 'lumamark-restore') return accept(async () => ({ ok: true, item: await service.restore(String(payload.id)) }));
     if (type === 'lumamark-reorder') return accept(async () => {

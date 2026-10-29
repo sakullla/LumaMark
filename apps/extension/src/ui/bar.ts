@@ -73,6 +73,28 @@ export function visibleItemCount(widths: readonly number[], container: number, t
   return count;
 }
 
+/** Width left for bar items after padding, trailing controls, and the gaps before those controls. */
+export function barItemBudget(input: {
+  clientWidth: number;
+  padding?: number;
+  otherWidth?: number;
+  overflowWidth?: number;
+  barGap?: number;
+}): number {
+  const gap = input.barGap ?? 4;
+  const other = Math.max(0, input.otherWidth ?? 0);
+  const overflow = Math.max(0, input.overflowWidth ?? 0);
+  const pieces = (other > 0 ? 1 : 0) + (overflow > 0 ? 1 : 0);
+  const room = input.clientWidth - Math.max(0, input.padding ?? 0) - other - overflow - pieces * gap;
+  return room > 0 ? room : 0;
+}
+
+/** '' moves to the top level. undefined keeps the drop on the item under the pointer. */
+export function barDropParent(input: { inBar: boolean; onOtherButton: boolean }): '' | undefined {
+  if (!input.inBar || input.onOtherButton) return '';
+  return undefined;
+}
+
 export function buildSearchUrl(template: string, query: string): string {
   const source = template.trim() || DEFAULT_SEARCH_URL;
   const parsed = new URL(source);

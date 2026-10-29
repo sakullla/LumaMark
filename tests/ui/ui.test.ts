@@ -33,5 +33,20 @@ describe('LumaMark UI state and documents', () => {
     expect(popupStatus('existing')).toContain('already saved');
     expect(popupStatus('undone')).toContain('undone');
     expect(settingsStatusMessage('error')).toContain('Local data is still available');
+    expect(settingsStatusMessage('saving', '', 'zh')).toContain('正在保存');
+    expect(settingsStatusMessage('syncing', '', 'zh')).toContain('正在同步');
+    expect(settingsStatusMessage('synced', '', 'zh')).toContain('已同步');
+    expect(settingsStatusMessage('error', '', 'zh')).toContain('同步失败');
+    expect(settingsStatusMessage('conflict', '', 'zh')).toContain('需要选择');
+    expect(settingsStatusMessage('synced', '', 'zh')).not.toContain('Synced');
+  });
+
+  it('includes bookmarks saved on the selected end date', () => {
+    const day = makeBookmark({ url: 'https://day.example/a', title: 'Day' }, '2024-01-02T12:00:00.000Z');
+    const earlier = makeBookmark({ url: 'https://day.example/b', title: 'Earlier' }, '2024-01-01T12:00:00.000Z');
+    const range = { ...defaultLibraryFilters(), from: '2024-01-02', to: '2024-01-02' };
+    expect(filterBookmarks([day, earlier], range).map((item) => item.id)).toEqual([day.id]);
+    expect(filterBookmarks([day], { ...defaultLibraryFilters(), to: '2024-01-02' }).map((item) => item.id)).toEqual([day.id]);
+    expect(filterBookmarks([day], { ...defaultLibraryFilters(), from: '2024-01-03' })).toEqual([]);
   });
 });

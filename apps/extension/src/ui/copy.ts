@@ -59,6 +59,7 @@ const en = {
   noMatchesHelp: 'Clear a filter or try another search.',
   noBookmarks: 'No bookmarks yet',
   emptyLibraryHelp: 'Save the current page or import browser bookmarks.',
+  emptyFolder: 'This folder has no bookmarks.',
   clearFilters: 'Clear search and filters',
   loadFailed: 'Couldn\'t load the list.',
   filters: 'Filters',
@@ -129,6 +130,12 @@ const en = {
   exportReady: 'Export ready.',
   exportFailed: 'Export failed.',
   openHome: 'Open home',
+  settingsIdle: 'Not configured',
+  settingsSaving: 'Saving settings…',
+  settingsSyncing: 'Syncing…',
+  settingsSynced: 'Synced successfully.',
+  settingsSyncFailed: 'Sync failed. Local data is still available; retry when ready.',
+  settingsConflict: 'A sync conflict needs your choice.',
 };
 
 const zh: { [K in keyof typeof en]: string } = {
@@ -190,6 +197,7 @@ const zh: { [K in keyof typeof en]: string } = {
   noMatchesHelp: '可以清除筛选后再看当前文件夹。',
   noBookmarks: '还没有书签',
   emptyLibraryHelp: '可以保存当前页，或导入浏览器书签。',
+  emptyFolder: '这个文件夹里没有书签。',
   clearFilters: '清除筛选',
   loadFailed: '列表没有载入。',
   filters: '筛选',
@@ -260,6 +268,12 @@ const zh: { [K in keyof typeof en]: string } = {
   exportReady: '导出已准备好。',
   exportFailed: '导出失败。',
   openHome: '打开首页',
+  settingsIdle: '尚未配置',
+  settingsSaving: '正在保存设置…',
+  settingsSyncing: '正在同步…',
+  settingsSynced: '已同步。',
+  settingsSyncFailed: '同步失败。本机数据仍在，可以稍后再试。',
+  settingsConflict: '需要选择冲突的版本。',
 };
 
 export type Copy = { [K in keyof typeof en]: string };

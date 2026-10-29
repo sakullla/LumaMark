@@ -55,6 +55,7 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
   const undo = root.querySelector<HTMLButtonElement>('#undo');
   const setStatus = (value: string) => { if (status) status.textContent = value; };
   let savedId: string | undefined;
+  let undoToken: string | undefined;
   let pageUrl = '';
 
   const extras = () => ({
@@ -131,6 +132,7 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
         setStatus(text.alreadySaved);
         return;
       }
+      undoToken = typeof response.undoToken === 'string' ? response.undoToken : undefined;
       await showSaved(outcome?.bookmark ?? {});
       setStatus(text.saved);
     } catch {
@@ -154,13 +156,19 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
     if (!savedId) return;
     const response = await sendRuntime(port, 'delete', { id: savedId });
     if (!response?.ok) { setStatus(text.notSaved); return; }
+    undoToken = typeof response.undoToken === 'string' ? response.undoToken : undefined;
     if (undo) undo.disabled = false;
     setStatus(text.deletedUndo);
   });
 
   undo?.addEventListener('click', async () => {
-    await sendRuntime(port, 'undo');
+    const response = await sendRuntime(port, 'undo', undoToken ? { token: undoToken } : undefined);
+    if (!response?.ok) {
+      setStatus(text.notSaved);
+      return;
+    }
     if (undo) undo.disabled = true;
+    undoToken = undefined;
     savedId = undefined;
     if (savedEditor) savedEditor.hidden = true;
     setStatus(text.undone);

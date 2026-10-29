@@ -53,8 +53,8 @@ export function filterBookmarks(bookmarks: Bookmark[], filters: LibraryFilters):
       if (query.tag && !bookmark.tags.includes(query.tag)) return false;
       if (query.domain && bookmark.domain !== query.domain) return false;
       if (query.favorite !== undefined && bookmark.favorite !== query.favorite) return false;
-      if (query.from && bookmark.updatedAt < query.from) return false;
-      if (query.to && bookmark.updatedAt > query.to) return false;
+      if (query.from && bookmark.updatedAt < inclusiveTimeBound(query.from, 'start')) return false;
+      if (query.to && bookmark.updatedAt > inclusiveTimeBound(query.to, 'end')) return false;
       if (needle) {
         const haystack = [bookmark.title, bookmark.url, bookmark.domain, bookmark.notes, ...bookmark.tags].join(' ').toLowerCase();
         if (!haystack.includes(needle)) return false;
@@ -71,6 +71,26 @@ export function filterBookmarks(bookmarks: Bookmark[], filters: LibraryFilters):
 export function bookmarksInFolder(bookmarks: Bookmark[], folderId: string | null, filters: LibraryFilters): Bookmark[] {
   const scoped = bookmarks.filter((bookmark) => (bookmark.collectionId ?? null) === folderId && !bookmark.deletedAt);
   return filterBookmarks(scoped, { ...filters, collectionId: '', includeDeleted: false });
+}
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+export function inclusiveTimeBound(value: string, edge: 'start' | 'end'): string {
+  if (!DATE_ONLY.test(value)) return value;
+  return edge === 'start' ? `${value}T00:00:00.000Z` : `${value}T23:59:59.999Z`;
+}
+
+export function libraryHasActiveFilters(filters: LibraryFilters): boolean {
+  return Boolean(filters.text.trim() || filters.tag.trim() || filters.domain.trim() || filters.from || filters.to || filters.favoriteOnly || filters.includeDeleted);
+}
+
+export function renderLibraryResults(bookmarks: Bookmark[], folderId: string | null, filters: LibraryFilters, language: UiLanguage = 'en'): string {
+  const visible = bookmarksInFolder(bookmarks, folderId, filters);
+  if (visible.length) return visible.map((bookmark) => renderBookmarkCard(bookmark, language)).join('');
+  const alive = bookmarks.some((bookmark) => !bookmark.deletedAt);
+  if (!alive && !libraryHasActiveFilters(filters)) return renderEmptyState(defaultLibraryFilters(), language);
+  if (libraryHasActiveFilters(filters)) return renderEmptyState(filters, language);
+  return `<section class="empty-state" role="status"><p>${escapeHtml(copyFor(language).emptyFolder)}</p></section>`;
 }
 
 export function searchBookmarks(bookmarks: Bookmark[], text: string): Bookmark[] {
@@ -226,10 +246,11 @@ export function settingsDocument(language: UiLanguage = 'en'): string {
 
 export function homeDocument(language: UiLanguage = 'en'): string {
   const text = copyFor(language);
-  return pageShell(language, 'LumaMark', `<main class="home-shell"><header class="page-header"><p class="brand">LumaMark</p><p id="sync-line" role="status"></p></header>` +
+  return pageShell(language, 'LumaMark', `<main class="home-shell">` +
     `<div id="bar-region" class="bar-region"><nav id="bookmark-bar" class="bookmark-bar" aria-label="${escapeHtml(text.barLabel)}"></nav>` +
     `<section id="bar-empty" class="empty-state" hidden><p>${escapeHtml(text.emptyBar)}</p><button id="save-current" class="primary" type="button">${escapeHtml(text.saveCurrent)}</button>` +
     `<label for="import-action">${escapeHtml(text.duplicateRule)}</label><select id="import-action">${duplicateOptions(language)}</select><button id="import-html" type="button">${escapeHtml(text.importHtml)}</button></section></div>` +
+    `<header class="page-header"><p class="brand">LumaMark</p><p id="sync-line" role="status"></p></header>` +
     `<form id="search-form" role="search"><label for="search">${escapeHtml(text.searchLabel)}</label><input id="search" type="search" autocomplete="off" placeholder="${escapeHtml(text.searchPlaceholder)}"></form>` +
     `<ul id="search-results" role="listbox"></ul><p id="search-note" role="status"></p>` +
     `<p class="page-links"><a href="library.html">${escapeHtml(text.library)}</a> <a href="settings.html">${escapeHtml(text.settings)}</a></p></main>`);

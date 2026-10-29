@@ -1,15 +1,20 @@
 import { collectionOptions, renderConflicts, settingsDocument } from '../ui/index';
 import { classifyFailure } from '../ui/bar';
-import { copyFor, detectUiLanguage, probeSentence } from '../ui/copy';
+import { copyFor, detectUiLanguage, probeSentence, type UiLanguage } from '../ui/copy';
 import { chooseTextFile } from './files';
 import { sendRuntime, type RuntimePort } from './popup';
 
 export type SettingsStatus = 'idle' | 'saving' | 'syncing' | 'synced' | 'error' | 'conflict';
 
-export function settingsStatusMessage(status: SettingsStatus, detail = ''): string {
+export function settingsStatusMessage(status: SettingsStatus, detail = '', language: UiLanguage = 'en'): string {
+  const text = copyFor(language);
   const labels: Record<SettingsStatus, string> = {
-    idle: 'Not configured', saving: 'Saving settings…', syncing: 'Syncing…', synced: 'Synced successfully.',
-    error: 'Sync failed. Local data is still available; retry when ready.', conflict: 'A sync conflict needs your choice.',
+    idle: text.settingsIdle,
+    saving: text.settingsSaving,
+    syncing: text.settingsSyncing,
+    synced: text.settingsSynced,
+    error: text.settingsSyncFailed,
+    conflict: text.settingsConflict,
   };
   return detail ? `${labels[status]} ${detail}` : labels[status];
 }
@@ -33,6 +38,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   const passwordInput = root.querySelector<HTMLInputElement>('#webdav-password');
   const autoSync = root.querySelector<HTMLInputElement>('#auto-sync');
   const setSync = (value: string) => { if (syncStatus) syncStatus.textContent = value; };
+  const statusText = (status: SettingsStatus, detail = '') => settingsStatusMessage(status, detail, language);
 
   const renderConflictList = async (items: Array<{ id: string; local?: { title?: string; url?: string; notes?: string }; remote?: { title?: string; url?: string; notes?: string } }> = []) => {
     if (!conflicts) return;
@@ -88,7 +94,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
     event.preventDefault();
     const form = event.currentTarget as HTMLFormElement;
     const data = new FormData(form);
-    setSync(settingsStatusMessage('saving'));
+    setSync(statusText('saving'));
     try {
       const response = await sendRuntime(port, 'sync-configure', {
         url: data.get('webdav-url'),
@@ -100,12 +106,12 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
       if (passwordInput) passwordInput.value = '';
       if (autoSync) autoSync.checked = Boolean(response?.autoSync);
       const kind = String(response?.probe ?? '');
-      if (!response?.ok) setSync(settingsStatusMessage('error'));
+      if (!response?.ok) setSync(statusText('error'));
       else if (kind === 'empty') setSync(text.syncLocal);
       else setSync(probeSentence(kind, language));
     } catch {
       if (passwordInput) passwordInput.value = '';
-      setSync(settingsStatusMessage('error'));
+      setSync(statusText('error'));
     }
   });
 
@@ -114,18 +120,18 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   });
 
   root.querySelector<HTMLButtonElement>('#sync-now')?.addEventListener('click', async () => {
-    setSync(settingsStatusMessage('syncing'));
+    setSync(statusText('syncing'));
     try {
       const response = await sendRuntime(port, 'sync');
-      if (response?.status === 'conflict') setSync(settingsStatusMessage('conflict'));
+      if (response?.status === 'conflict') setSync(statusText('conflict'));
       else if (response?.status === 'error' || response?.ok === false) {
         const kind = classifyFailure(String(response?.error ?? ''));
-        setSync(kind && kind !== 'other' ? probeSentence(kind, language) : settingsStatusMessage('error'));
-      } else setSync(settingsStatusMessage('synced'));
+        setSync(kind && kind !== 'other' ? probeSentence(kind, language) : statusText('error'));
+      } else setSync(statusText('synced'));
       await renderConflictList(response?.conflicts ?? []);
       await loadConflicts();
     } catch {
-      setSync(settingsStatusMessage('error'));
+      setSync(statusText('error'));
     }
   });
 
