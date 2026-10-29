@@ -47,11 +47,11 @@ describe('IndexedDbRepository', () => {
     const repository = new IndexedDbRepository(`test-${crypto.randomUUID()}`);
     repositories.push(repository);
     const parent: Collection = {
-      id: 'parent', name: 'Parent', position: 0,
+      id: 'parent', name: 'Parent', position: 0, toolbar: false,
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', revision: 1,
     };
     const child: Collection = {
-      id: 'child', name: 'Child', parentId: parent.id, position: 0,
+      id: 'child', name: 'Child', parentId: parent.id, position: 0, toolbar: false,
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', revision: 1,
     };
     await repository.putCollection(parent);
