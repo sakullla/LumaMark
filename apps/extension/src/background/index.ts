@@ -97,7 +97,24 @@ const AUTO_SYNC_ALARM = 'lumamark-auto-sync';
 const AUTO_SYNC_PERIOD_MINUTES = 5;
 
 export function startBackground(api = resolveExtensionApi(), repository = new IndexedDbRepository()): void {
-  const service = new BookmarkService(repository);
+  // The URL index returns one row. A tombstone can sort before a live bookmark with the same URL.
+  const bookmarkForSave = async (url: string): Promise<Bookmark | undefined> => {
+    let normalized = url;
+    try { normalized = normalizeUrl(url); } catch { return repository.findByUrl(url); }
+    const items = await repository.list({ includeDeleted: true });
+    const matches = items.filter((item) => {
+      if (item.url === normalized) return true;
+      try { return normalizeUrl(item.url) === normalized; } catch { return false; }
+    });
+    return matches.find((item) => !item.deletedAt) ?? matches[0] ?? repository.findByUrl(normalized);
+  };
+  const service = new BookmarkService({
+    list: (query) => repository.list(query),
+    findById: (id) => repository.findById(id),
+    findByUrl: (url) => bookmarkForSave(url),
+    put: (bookmark) => repository.put(bookmark),
+    remove: (id) => repository.remove(id),
+  });
   let syncConfig: SyncConfig | undefined;
   let memorySearchUrl = DEFAULT_SEARCH_URL;
   let undoMemory: StoredUndo[] = [];
@@ -353,7 +370,7 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
         const page = await captureActivePage(api);
         lastSavePage = page;
         const savable = isSavablePageUrl(page.url);
-        const found = savable ? await repository.findByUrl(normalizeUrl(page.url)) : undefined;
+        const found = savable ? await bookmarkForSave(page.url) : undefined;
         return { ok: true, page, savable, existing: found && !found.deletedAt ? found : undefined };
       } catch {
         return { ok: true, page: {}, savable: false, unsavable: true };

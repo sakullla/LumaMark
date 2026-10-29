@@ -65,14 +65,97 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
   let model: BarModel = { items: [], other: [] };
   let drag: { kind: 'bookmark' | 'folder'; id: string } | undefined;
   let layingOut = false;
+  const liftedMenus = new Map<HTMLElement, { parent: HTMLElement; next: ChildNode | null; anchor: HTMLElement }>();
 
   const bar = () => root.querySelector<HTMLElement>('#bookmark-bar');
   const note = () => root.querySelector<HTMLElement>('#search-note');
   const results = () => root.querySelector<HTMLElement>('#search-results');
+  const menuLayer = () => root.querySelector<HTMLElement>('#bar-region');
+
+  const restoreLiftedMenu = (menu: HTMLElement) => {
+    const home = liftedMenus.get(menu);
+    if (!home) return;
+    menu.style.position = '';
+    menu.style.top = '';
+    menu.style.left = '';
+    menu.style.zIndex = '';
+    if (home.parent.isConnected) {
+      if (home.next && home.next.parentNode === home.parent) home.parent.insertBefore(menu, home.next);
+      else home.parent.append(menu);
+    } else menu.remove();
+    liftedMenus.delete(menu);
+  };
+
+  const restoreLiftedMenus = () => {
+    for (const menu of [...liftedMenus.keys()]) restoreLiftedMenu(menu);
+  };
+
+  // The bar clips its row. An open menu is attached to #bar-region, which does not.
+  const positionLiftedMenu = (menu: HTMLElement, anchor: HTMLElement, layer: HTMLElement) => {
+    if (typeof anchor.getBoundingClientRect !== 'function' || typeof layer.getBoundingClientRect !== 'function') return;
+    const anchorRect = anchor.getBoundingClientRect();
+    const nested = Boolean(anchor.closest('.folder-menu'));
+    const topEdge = nested ? anchorRect.top : anchorRect.bottom;
+    const leftEdge = nested ? anchorRect.right : anchorRect.left;
+    const layerRect = layer.getBoundingClientRect();
+    menu.style.position = 'absolute';
+    menu.style.zIndex = '5';
+    menu.style.top = `${topEdge - layerRect.top}px`;
+    menu.style.left = `${leftEdge - layerRect.left}px`;
+  };
+
+  const liftMenu = (menu: HTMLElement, anchor: HTMLElement) => {
+    const layer = menuLayer();
+    if (!layer) return;
+    if (liftedMenus.has(menu)) {
+      positionLiftedMenu(menu, anchor, layer);
+      return;
+    }
+    if (!menu.closest('.bookmark-bar, .bar-items')) return;
+    const parent = menu.parentElement;
+    if (!parent || parent === layer) return;
+    liftedMenus.set(menu, { parent, next: menu.nextSibling, anchor });
+    menu.style.position = 'absolute';
+    menu.style.zIndex = '5';
+    layer.append(menu);
+    positionLiftedMenu(menu, anchor, layer);
+  };
+
+  const menuFor = (button: HTMLElement): HTMLElement | undefined => {
+    const inline = button.parentElement?.querySelector<HTMLElement>(':scope > .folder-menu');
+    if (inline) return inline;
+    for (const [menu, home] of liftedMenus) {
+      if (home.anchor === button) return menu;
+    }
+    return undefined;
+  };
+
+  const closeMenu = (menu: HTMLElement) => {
+    menu.querySelectorAll<HTMLElement>('.folder-menu').forEach((nested) => { nested.hidden = true; });
+    menu.hidden = true;
+    const anchor = liftedMenus.get(menu)?.anchor;
+    restoreLiftedMenu(menu);
+    anchor?.setAttribute('aria-expanded', 'false');
+  };
+
+  const openMenu = (button: HTMLElement, menu: HTMLElement) => {
+    const scope = button.parentElement?.parentElement;
+    scope?.querySelectorAll<HTMLElement>(':scope > .folder > .folder-menu, :scope > .bar-menu > .folder-menu').forEach((other) => {
+      if (other !== menu) other.hidden = true;
+    });
+    for (const [other, home] of [...liftedMenus]) {
+      if (other !== menu && scope?.contains(home.anchor)) closeMenu(other);
+    }
+    menu.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    liftMenu(menu, button);
+  };
 
   const layoutBar = () => {
     if (layingOut) return;
     layingOut = true;
+    const reopen = [...liftedMenus].filter(([menu]) => !menu.hidden).map(([menu, home]) => ({ menu, anchor: home.anchor }));
+    restoreLiftedMenus();
     try {
       const target = bar();
       const itemsHost = target?.querySelector<HTMLElement>('.bar-items');
@@ -103,11 +186,18 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
       items.slice(visible).forEach((item) => overflowMenu.append(item));
       overflowWrap.hidden = visible >= items.length;
     } finally {
-      layingOut = false;
+      try {
+        for (const entry of reopen) {
+          if (entry.menu.isConnected && !entry.menu.hidden) liftMenu(entry.menu, entry.anchor);
+        }
+      } finally {
+        layingOut = false;
+      }
     }
   };
 
   const render = () => {
+    restoreLiftedMenus();
     const target = bar();
     const empty = root.querySelector<HTMLElement>('#bar-empty');
     if (!target) return;
@@ -127,15 +217,15 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
   };
 
   const toggleMenu = (button: HTMLElement) => {
-    const menu = button.parentElement?.querySelector<HTMLElement>(':scope > .folder-menu');
+    const menu = menuFor(button);
     if (!menu) return;
-    const open = menu.hidden;
-    button.parentElement?.parentElement?.querySelectorAll<HTMLElement>(':scope > .folder > .folder-menu, :scope > .bar-menu > .folder-menu').forEach((otherMenu) => {
-      if (otherMenu !== menu) otherMenu.hidden = true;
-    });
-    menu.hidden = !open;
-    button.setAttribute('aria-expanded', String(open));
-    if (open) menu.querySelector<HTMLElement>('a, button')?.focus();
+    if (!menu.hidden) {
+      closeMenu(menu);
+      button.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    openMenu(button, menu);
+    menu.querySelector<HTMLElement>('a, button')?.focus();
   };
 
   const focusRow = (container: HTMLElement, key: string) => {
@@ -147,7 +237,8 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     return true;
   };
 
-  bar()?.addEventListener('click', (event) => {
+  const menuHost = menuLayer() ?? bar();
+  menuHost?.addEventListener('click', (event) => {
     const button = (event.target as HTMLElement).closest<HTMLElement>('.folder > .bar-hit, #other-bookmarks, #overflow-button');
     if (!button) return;
     event.preventDefault();
@@ -155,11 +246,13 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     toggleMenu(button);
   });
 
-  bar()?.addEventListener('keydown', (event) => {
+  menuHost?.addEventListener('keydown', (event) => {
     const target = event.target as HTMLElement;
     const key = event.key;
     if (key === 'Escape') {
       root.querySelectorAll<HTMLElement>('.folder-menu').forEach((menu) => { menu.hidden = true; });
+      for (const home of liftedMenus.values()) home.anchor.setAttribute('aria-expanded', 'false');
+      restoreLiftedMenus();
       return;
     }
     if ((key === 'Enter' || key === ' ') && target.matches('.folder > .bar-hit, #other-bookmarks, #overflow-button')) {
@@ -169,10 +262,9 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     }
     if (key === 'ArrowDown' && target.matches('.folder > .bar-hit, #other-bookmarks, #overflow-button')) {
       event.preventDefault();
-      const menu = target.parentElement?.querySelector<HTMLElement>(':scope > .folder-menu');
+      const menu = menuFor(target);
       if (!menu) return;
-      menu.hidden = false;
-      target.setAttribute('aria-expanded', 'true');
+      openMenu(target, menu);
       menu.querySelector<HTMLElement>(':scope > a.bar-item, :scope > .folder > .bar-hit')?.focus();
       return;
     }
@@ -183,8 +275,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
       event.preventDefault();
       const nested = target.parentElement?.querySelector<HTMLElement>(':scope > .folder-menu');
       if (!nested) return;
-      nested.hidden = false;
-      target.setAttribute('aria-expanded', 'true');
+      openMenu(target, nested);
       nested.querySelector<HTMLElement>('a, button')?.focus();
       return;
     }
@@ -228,7 +319,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     let parentId = model.toolbarId ?? '';
     let beforeId: string | undefined;
     const topLevel = barDropParent({
-      inBar: Boolean(hit.closest('#bookmark-bar')),
+      inBar: Boolean(hit.closest('#bookmark-bar')) || Boolean(hit.closest('.folder-menu')),
       onOtherButton: Boolean(hit.closest('#other-bookmarks')),
     });
     if (topLevel === '') parentId = '';

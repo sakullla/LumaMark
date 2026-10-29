@@ -535,5 +535,31 @@ describe('browser adapter', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('keeps a live bookmark when the same URL also has a deleted tombstone', async () => {
+    const repository = new IndexedDbRepository(`lumamark-live-${crypto.randomUUID()}`);
+    const now = '2026-03-01T00:00:00.000Z';
+    const tombstone = { ...makeBookmark({ id: 'a-gone', url: 'https://same.example/page', title: 'Gone' }, now), deletedAt: now };
+    const live = makeBookmark({ id: 'z-live', url: 'https://same.example/page', title: 'Live' }, now);
+    await repository.put(tombstone);
+    await repository.put(live);
+    expect(await repository.findByUrl(live.url)).toMatchObject({ id: tombstone.id, deletedAt: now });
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    startBackground({
+      i18n: { getUILanguage: () => 'en' },
+      tabs: { query: vi.fn().mockResolvedValue([{ url: 'https://same.example/page', title: 'Live page' }]), create: vi.fn() },
+      notifications: { create: vi.fn().mockResolvedValue('notice'), onButtonClicked: { addListener: vi.fn() } },
+      runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } },
+    }, repository);
+    const send = (message: unknown) => new Promise<any>((resolve) => { listener?.(message, {}, resolve); });
+    const captured = await send({ type: 'lumamark-capture' });
+    expect(captured.existing).toMatchObject({ id: live.id, title: 'Live' });
+    expect(captured.existing.deletedAt).toBeUndefined();
+    const saved = await send({ type: 'lumamark-save' });
+    expect(saved.result).toMatchObject({ kind: 'existing', existing: { id: live.id } });
+    const records = await repository.list({ includeDeleted: true });
+    expect(records).toHaveLength(2);
+    expect(records.filter((item) => !item.deletedAt).map((item) => item.id)).toEqual([live.id]);
+  });
 });
 
