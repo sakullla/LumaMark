@@ -45,13 +45,19 @@ class MemoryRepository implements SyncRepository {
 class MemoryClient implements WebDavClient {
   public snapshot: { manifest?: SyncManifest; etag?: string } = {};
   public fail = false;
+  public failWrite = false;
   public notFound = false;
   async read() {
     if (this.fail) throw new Error('network unavailable');
     if (this.notFound) throw new Error('WebDAV read failed (404)');
     return this.snapshot;
   }
-  async write(manifest: SyncManifest, etag?: string) { if (this.fail) throw new Error('remote is read-only'); this.snapshot = { manifest, etag: etag ?? 'etag-1' }; return { etag: 'etag-2' }; }
+  async write(manifest: SyncManifest, etag?: string) {
+    if (this.fail) throw new Error('remote is read-only');
+    if (this.failWrite) throw new Error('WebDAV write failed (403)');
+    this.snapshot = { manifest, etag: etag ?? 'etag-1' };
+    return { etag: 'etag-2' };
+  }
 }
 
 describe('WebDavSyncEngine', () => {
@@ -89,6 +95,46 @@ describe('WebDavSyncEngine', () => {
     expect(client.snapshot.manifest?.bookmarks).toHaveLength(2);
     expect(client.snapshot.manifest?.collections.map((item) => item.id).sort()).toEqual(['local-folder', 'remote-folder']);
     expect((await repository.listCollections()).map((item) => item.id)).toContain('remote-folder');
+  });
+
+  it('keeps local bookmarks and folders unchanged when the remote write fails', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.autoSync = true;
+    repository.metadata.lastSyncAt = '2024-01-02T00:00:00.000Z';
+    await repository.put(bookmark('same', 'Local', 1, '2024-01-01T00:00:00.000Z'));
+    await repository.put(bookmark('hidden', 'Visible', 1, '2024-01-01T00:00:00.000Z'));
+    await repository.putCollection(collection('folder', 'Local folder', 1, '2024-01-01T00:00:00.000Z'));
+    const client = new MemoryClient();
+    client.failWrite = true;
+    const remoteManifest: SyncManifest = {
+      format: 'lumamark-sync',
+      schemaVersion: 2,
+      generatedAt: '2024-01-03T00:00:00.000Z',
+      deviceId: 'device-b',
+      bookmarks: [
+        bookmark('same', 'Remote', 4, '2024-01-03T00:00:00.000Z'),
+        bookmark('added', 'Added', 1, '2024-01-03T00:00:00.000Z'),
+        { ...bookmark('hidden', 'Remote hidden', 4, '2024-01-03T00:00:00.000Z'), deletedAt: '2024-01-03T00:00:00.000Z' },
+      ],
+      collections: [
+        collection('folder', 'Remote folder', 4, '2024-01-03T00:00:00.000Z', '2024-01-03T00:00:00.000Z'),
+        collection('added-folder', 'Added folder', 1, '2024-01-03T00:00:00.000Z'),
+      ],
+    };
+    client.snapshot.manifest = remoteManifest;
+    const result = await new WebDavSyncEngine(repository, client).sync();
+    expect(result.status).toBe('error');
+    expect(result.error).toBe('WebDAV write failed (403)');
+    expect(repository.metadata.status).toBe('error');
+    expect(repository.metadata.autoSync).toBe(false);
+    expect(repository.metadata.lastSyncAt).toBe('2024-01-02T00:00:00.000Z');
+    expect(await repository.findById('same')).toMatchObject({ title: 'Local', revision: 1, updatedAt: '2024-01-01T00:00:00.000Z' });
+    expect((await repository.findById('same'))?.deletedAt).toBeUndefined();
+    expect(await repository.findById('hidden')).toMatchObject({ title: 'Visible', revision: 1, updatedAt: '2024-01-01T00:00:00.000Z' });
+    expect((await repository.findById('hidden'))?.deletedAt).toBeUndefined();
+    expect(await repository.findById('added')).toBeUndefined();
+    expect(await repository.listCollections()).toEqual([collection('folder', 'Local folder', 1, '2024-01-01T00:00:00.000Z')]);
+    expect(client.snapshot.manifest).toBe(remoteManifest);
   });
 
   it('keeps local data and reports errors when WebDAV fails', async () => {

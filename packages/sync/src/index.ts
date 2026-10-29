@@ -191,6 +191,8 @@ export class WebDavSyncEngine {
       const remoteById = new Map(remote.map((item) => [item.id, item]));
       const merged = new Map<string, Bookmark>();
       const conflicts: ConflictRecord[] = [];
+      const pendingBookmarks: Bookmark[] = [];
+      const pendingCollections: Collection[] = [];
       const { unresolvedByBookmark, resolvedByBookmark } = conflictIndexes(await this.repository.listConflicts(true));
       const ids = new Set([...byId.keys(), ...remoteById.keys()]);
       const mergedCollections = new Map<string, Collection>(localCollections.map((item) => [item.id, item]));
@@ -198,7 +200,7 @@ export class WebDavSyncEngine {
         const localCollection = mergedCollections.get(collection.id);
         if (!localCollection) {
           mergedCollections.set(collection.id, collection);
-          await this.repository.putCollection(collection);
+          pendingCollections.push(collection);
           continue;
         }
         if (equalCollection(localCollection, collection)) continue;
@@ -208,9 +210,7 @@ export class WebDavSyncEngine {
         // though ConflictRecord currently models bookmark fields only.
         const selected = newerCollection(localCollection, collection);
         mergedCollections.set(collection.id, selected);
-        if (selected !== localCollection) {
-          await this.repository.putCollection(selected);
-        }
+        if (selected !== localCollection) pendingCollections.push(selected);
       }
 
       for (const id of ids) {
@@ -218,7 +218,7 @@ export class WebDavSyncEngine {
         const remoteItem = remoteById.get(id);
         if (!localItem && remoteItem) {
           merged.set(id, remoteItem);
-          await this.repository.put(remoteItem);
+          pendingBookmarks.push(remoteItem);
           continue;
         }
         if (localItem && !remoteItem) {
@@ -259,7 +259,7 @@ export class WebDavSyncEngine {
           merged.set(id, localItem);
         } else {
           merged.set(id, remoteItem);
-          await this.repository.put(remoteItem);
+          pendingBookmarks.push(remoteItem);
         }
       }
 
@@ -270,8 +270,14 @@ export class WebDavSyncEngine {
         [...mergedCollections.values()].map((item) => migrateCollection(item)),
         now,
       );
+      // A rejected WebDAV write must not change local titles or deletedAt.
+      const persistAdopted = async (): Promise<void> => {
+        for (const item of pendingCollections) await this.repository.putCollection(item);
+        for (const item of pendingBookmarks) await this.repository.put(item);
+      };
       if (!conflicts.length) {
         const written = await this.client.write(manifest, remoteSnapshot.etag);
+        await persistAdopted();
         const metadata: SyncMetadata = {
           ...before,
           status: 'idle',
@@ -283,6 +289,8 @@ export class WebDavSyncEngine {
         return { status: 'idle', mergedCount: merged.size, conflicts: [], lastSyncAt: written.etag ? now : now };
       }
 
+      // Bookmark conflicts are not published. Unrelated remote records still converge locally.
+      await persistAdopted();
       await this.repository.setSyncMetadata({
         ...before,
         status: 'conflict',
