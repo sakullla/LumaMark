@@ -124,11 +124,17 @@ export class WebDavSyncEngine {
   async resolveConflict(conflictId: string, resolution: ConflictResolution, merged?: Bookmark): Promise<ConflictRecord> {
     const conflict = (await this.repository.listConflicts()).find((item) => item.id === conflictId);
     if (!conflict) throw new Error('Conflict not found');
-    const selected = resolution === 'local' ? conflict.local : resolution === 'remote' ? conflict.remote : merged;
-    if (!selected || selected.id !== conflict.bookmarkId) throw new Error('Merged bookmark is required for this conflict');
-    await this.repository.put(selected);
+    const chosen = resolution === 'local' ? conflict.local : resolution === 'remote' ? conflict.remote : merged;
+    if (!chosen || chosen.id !== conflict.bookmarkId) throw new Error('Merged bookmark is required for this conflict');
     const resolvedAt = new Date().toISOString();
-    const syncBaseline = [resolvedAt, conflict.local.updatedAt, conflict.remote.updatedAt, selected.updatedAt].sort().at(-1)!;
+    // Once both timestamps fall behind lastSyncAt, merge keeps the higher revision.
+    // Lift the choice above both sides and stamp it with that same baseline.
+    const selected: Bookmark = {
+      ...chosen,
+      updatedAt: resolvedAt,
+      revision: Math.max(conflict.local.revision, conflict.remote.revision, chosen.revision) + 1,
+    };
+    await this.repository.put(selected);
     const resolved: ConflictRecord = { ...conflict, resolvedAt, resolution };
     await this.repository.putConflict(resolved);
     const remainingConflicts = await this.repository.listConflicts();
@@ -136,9 +142,7 @@ export class WebDavSyncEngine {
     await this.repository.setSyncMetadata({
       ...metadata,
       status: remainingConflicts.length ? 'conflict' : 'idle',
-      // Establish a new sync baseline so the selected version is not
-      // considered a second simultaneous edit on the next sync.
-      lastSyncAt: syncBaseline,
+      lastSyncAt: resolvedAt,
       pendingChanges: remainingConflicts.length,
       error: undefined,
     });
