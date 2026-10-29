@@ -73,6 +73,7 @@ describe('browser adapter', () => {
       const manifest = JSON.parse(readFileSync(`dist/extension/${target}/manifest.json`, 'utf8'));
       expect(manifest.chrome_url_overrides.newtab).toBe('home.html');
       expect(manifest.permissions).not.toContain('bookmarks');
+      if (target === 'chrome' || target === 'safari') expect(manifest.host_permissions).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*']));
       expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('lumamark-save-page');
       expect(readFileSync(`dist/extension/${target}/background.js`, 'utf8')).toContain('return true');
       const content = readFileSync(`dist/extension/${target}/content.js`, 'utf8');

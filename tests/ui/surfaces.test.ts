@@ -169,6 +169,7 @@ describe('bookmark bar and shared surfaces', () => {
       const manifest = JSON.parse(readFileSync(`apps/extension/manifest.${name}.json`, 'utf8'));
       expect(manifest.chrome_url_overrides.newtab).toBe('home.html');
       expect(manifest.permissions).not.toContain('bookmarks');
+      if (name === 'chrome') expect(manifest.host_permissions).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*']));
     }
     const pages = ['popup.ts', 'library.ts', 'settings.ts', 'home.ts'];
     for (const page of pages) {
