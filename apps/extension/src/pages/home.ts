@@ -163,6 +163,8 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     tooltip.style.display = '';
     tooltip.style.pointerEvents = '';
     tooltip.style.maxWidth = '';
+    tooltip.style.whiteSpace = '';
+    tooltip.style.overflowWrap = '';
     if (home.parent.isConnected) {
       if (home.next && home.next.parentNode === home.parent) home.parent.insertBefore(tooltip, home.next);
       else home.parent.append(tooltip);
@@ -182,17 +184,41 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     return font > 0 ? font * 0.2 : 3.2;
   };
 
+  const viewportWidth = (layer: HTMLElement): number => {
+    const root = layer.ownerDocument?.documentElement;
+    if (root && root.clientWidth > 0) return root.clientWidth;
+    const inner = layer.ownerDocument?.defaultView?.innerWidth ?? 0;
+    return inner > 0 ? inner : 0;
+  };
+
+  // Nowrap text runs past the right edge. Slide it back, and wrap only when it is wider than the viewport.
   const positionLiftedTooltip = (tooltip: HTMLElement, anchor: HTMLElement, layer: HTMLElement) => {
     tooltip.style.position = 'absolute';
     tooltip.style.zIndex = '4';
     tooltip.style.display = 'block';
     tooltip.style.pointerEvents = 'none';
+    tooltip.style.whiteSpace = 'nowrap';
+    tooltip.style.overflowWrap = '';
     tooltip.style.maxWidth = 'none';
     if (typeof anchor.getBoundingClientRect !== 'function' || typeof layer.getBoundingClientRect !== 'function') return;
     const anchorRect = anchor.getBoundingClientRect();
     const layerRect = layer.getBoundingClientRect();
+    const viewport = viewportWidth(layer);
+    let width = typeof tooltip.getBoundingClientRect === 'function' ? tooltip.getBoundingClientRect().width : 0;
+    if (viewport > 0 && width > viewport) {
+      tooltip.style.whiteSpace = 'normal';
+      tooltip.style.overflowWrap = 'anywhere';
+      tooltip.style.maxWidth = `${viewport}px`;
+      width = typeof tooltip.getBoundingClientRect === 'function' ? tooltip.getBoundingClientRect().width : viewport;
+      if (width > viewport) width = viewport;
+    }
+    let viewLeft = anchorRect.left;
+    if (viewport > 0 && width > 0) {
+      if (viewLeft + width > viewport) viewLeft = viewport - width;
+      if (viewLeft < 0) viewLeft = 0;
+    }
     tooltip.style.top = `${anchorRect.bottom - layerRect.top + tooltipGap(layer)}px`;
-    tooltip.style.left = `${anchorRect.left - layerRect.left}px`;
+    tooltip.style.left = `${viewLeft - layerRect.left}px`;
   };
 
   const tooltipOf = (anchor: HTMLElement): HTMLElement | undefined => {

@@ -47,6 +47,8 @@ class MiniElement extends MiniNode {
   style: Record<string, string> = {};
   listeners = new Map<string, Array<(event: MiniEvent) => void>>();
   clientWidth = 0;
+  box: { top: number; left: number; right: number; bottom: number; width: number; height: number } | null = null;
+  nowrapWidth = 0;
   constructor(doc: MiniDocument, readonly tagName: string) { super(doc); }
 
   get id(): string { return this.getAttribute('id') ?? ''; }
@@ -146,7 +148,19 @@ class MiniElement extends MiniNode {
     this.dispatchEvent(new MiniEvent('focusin', { bubbles: true, relatedTarget: prev }));
   }
   getBoundingClientRect(): { top: number; left: number; right: number; bottom: number; width: number; height: number } {
-    return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    if (this.classList.contains('item-tooltip') && this.nowrapWidth > 0) {
+      const wraps = this.style.whiteSpace === 'normal';
+      const maxRaw = this.style.maxWidth;
+      const maxWidth = !maxRaw || maxRaw === 'none' ? Number.POSITIVE_INFINITY : Number.parseFloat(maxRaw);
+      const ink = wraps && Number.isFinite(maxWidth) ? Math.min(this.nowrapWidth, maxWidth) : this.nowrapWidth;
+      const layer = this.closest('#bar-region');
+      const layerLeft = layer?.box?.left ?? 0;
+      const cssLeft = Number.parseFloat(this.style.left || '0');
+      const left = layerLeft + (Number.isFinite(cssLeft) ? cssLeft : 0);
+      const top = (layer?.box?.top ?? 0) + (Number.parseFloat(this.style.top || '0') || 0);
+      return { top, left, right: left + ink, bottom: top + 18, width: ink, height: 18 };
+    }
+    return this.box ?? { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 };
   }
   matches(selector: string): boolean { return parseList(selector).some((chain) => matchChain(this, chain, this)); }
   closest(selector: string): MiniElement | null {
@@ -481,5 +495,89 @@ describe('bookmark bar full titles', () => {
     } finally {
       process.off('unhandledRejection', onRejection);
     }
+  });
+
+  it('keeps a right-edge full title inside the viewport on hover and keyboard focus', async () => {
+    const viewport = 640;
+    const layerLeft = 16;
+    const leftTitle = 'Left bookmark';
+    const rightTitle = 'Saved research on WebDAV conflict handling and folder order';
+    const toolbar: Collection = { id: 'bar', name: 'Toolbar', position: 0, toolbar: true, createdAt: now, updatedAt: now, revision: 1 };
+    const left = makeBookmark({ url: 'https://left.example/a', title: leftTitle, collectionId: 'bar', position: 0 }, now);
+    const right = makeBookmark({ url: 'https://right.example/a', title: rightTitle, collectionId: 'bar', position: 1 }, now);
+    const doc = new MiniDocument();
+    doc.documentElement.clientWidth = viewport;
+    const region = doc.createElement('div');
+    region.id = 'bar-region';
+    region.className = 'bar-region';
+    region.box = { top: 8, left: layerLeft, right: layerLeft + 600, bottom: 48, width: 600, height: 40 };
+    const bar = doc.createElement('nav');
+    bar.id = 'bookmark-bar';
+    bar.className = 'bookmark-bar';
+    region.append(bar);
+    doc.body.append(region);
+    vi.stubGlobal('document', doc);
+    const port = {
+      async sendMessage(message: { type?: string }) {
+        if (message.type === 'lumamark-list') return { items: [left, right] };
+        if (message.type === 'lumamark-list-collections') return { items: [toolbar] };
+        if (message.type === 'lumamark-get-sync-config') return { config: {} };
+        if (message.type === 'lumamark-sync-status') return { metadata: {} };
+        return {};
+      },
+    };
+    mountHome(doc.body as never, port);
+    await vi.waitFor(() => expect(doc.body.querySelectorAll('a.bar-item')).toHaveLength(2));
+    const links = doc.body.querySelectorAll('a.bar-item');
+    const leftLink = links.find((link) => link.querySelector('.item-tooltip')?.textContent === leftTitle);
+    const rightLink = links.find((link) => link.querySelector('.item-tooltip')?.textContent === rightTitle);
+    const leftTip = leftLink?.querySelector('.item-tooltip');
+    const rightTip = rightLink?.querySelector('.item-tooltip');
+    expect(leftLink && rightLink && leftTip && rightTip).toBeTruthy();
+    leftLink!.box = { top: 12, left: 24, right: 150, bottom: 42, width: 126, height: 30 };
+    rightLink!.box = { top: 12, left: 260, right: 420, bottom: 42, width: 160, height: 30 };
+    leftTip!.nowrapWidth = 120;
+    rightTip!.nowrapWidth = 459;
+
+    const inside = (tip: MiniElement, width: number) => {
+      const rect = tip.getBoundingClientRect();
+      expect(rect.left).toBeGreaterThanOrEqual(0);
+      expect(rect.right).toBeLessThanOrEqual(viewport);
+      expect(rect.width).toBe(width);
+      expect(tip.textContent).toBe(rightTitle);
+      expect(tip.style.display).toBe('block');
+      expect(tip.parentElement?.id).toBe('bar-region');
+      expect(clippingAncestor(tip)).toBeNull();
+      return rect;
+    };
+
+    rightLink!.querySelector('.item-label')?.dispatchEvent(new MiniEvent('mouseover', { bubbles: true }));
+    const hovered = inside(rightTip!, 459);
+    expect(hovered.left).toBeLessThan(rightLink!.box!.left);
+    expect(rightTip!.style.whiteSpace).toBe('nowrap');
+
+    rightLink!.dispatchEvent(new MiniEvent('mouseout', { bubbles: true }));
+    rightLink!.focus();
+    const focused = inside(rightTip!, 459);
+    expect(focused.left).toBeLessThan(rightLink!.box!.left);
+    expect(focused.right).toBe(hovered.right);
+
+    rightLink!.dispatchEvent(new MiniEvent('mouseout', { bubbles: true }));
+    leftLink!.querySelector('.item-label')?.dispatchEvent(new MiniEvent('mouseover', { bubbles: true }));
+    const leftRect = leftTip!.getBoundingClientRect();
+    expect(leftRect.left).toBe(leftLink!.box!.left);
+    expect(leftRect.right).toBeLessThanOrEqual(viewport);
+    expect(leftTip!.textContent).toBe(leftTitle);
+
+    leftLink!.dispatchEvent(new MiniEvent('mouseout', { bubbles: true }));
+    rightTip!.nowrapWidth = 900;
+    rightLink!.querySelector('.item-label')?.dispatchEvent(new MiniEvent('mouseover', { bubbles: true }));
+    const wrapped = rightTip!.getBoundingClientRect();
+    expect(rightTip!.style.whiteSpace).toBe('normal');
+    expect(Number.parseFloat(rightTip!.style.maxWidth)).toBeLessThanOrEqual(viewport);
+    expect(wrapped.left).toBeGreaterThanOrEqual(0);
+    expect(wrapped.right).toBeLessThanOrEqual(viewport);
+    expect(wrapped.width).toBeLessThanOrEqual(viewport);
+    expect(rightTip!.textContent).toBe(rightTitle);
   });
 });
