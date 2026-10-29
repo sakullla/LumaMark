@@ -4,12 +4,14 @@ import {
   ConflictRecord,
   Collection,
   CURRENT_SCHEMA_VERSION,
+  migrateBookmark,
+  migrateCollection,
   SyncMetadata,
 } from '../../domain/src/index';
 
 export interface SyncManifest {
   format: 'lumamark-sync';
-  schemaVersion: typeof CURRENT_SCHEMA_VERSION;
+  schemaVersion: 1 | typeof CURRENT_SCHEMA_VERSION;
   generatedAt: string;
   deviceId: string;
   bookmarks: Bookmark[];
@@ -45,23 +47,60 @@ export interface SyncResult {
 
 export type ConflictResolution = 'local' | 'remote' | 'merged';
 
+function bookmarkSignature(bookmark: Bookmark): string {
+  const item = migrateBookmark(bookmark);
+  return JSON.stringify([
+    item.id,
+    item.url,
+    item.title,
+    item.domain,
+    item.faviconUrl ?? null,
+    item.notes,
+    item.tags,
+    item.collectionId ?? null,
+    item.position,
+    item.favorite,
+    item.createdAt,
+    item.updatedAt,
+    item.deletedAt ?? null,
+    item.revision,
+  ]);
+}
+
 function equalBookmark(left: Bookmark, right: Bookmark): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return bookmarkSignature(left) === bookmarkSignature(right);
 }
 
 function changedSince(bookmark: Bookmark, lastSyncAt?: string): boolean {
   return !lastSyncAt || bookmark.updatedAt > lastSyncAt;
 }
 
+function collectionSignature(collection: Collection): string {
+  const item = migrateCollection(collection);
+  return JSON.stringify([
+    item.id,
+    item.name,
+    item.parentId ?? null,
+    item.position,
+    item.toolbar,
+    item.createdAt,
+    item.updatedAt,
+    item.deletedAt ?? null,
+    item.revision,
+  ]);
+}
+
 function equalCollection(left: Collection, right: Collection): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return collectionSignature(left) === collectionSignature(right);
 }
 
 function newerCollection(left: Collection, right: Collection): Collection {
-  if (right.revision !== left.revision) return right.revision > left.revision ? right : left;
-  if (right.updatedAt !== left.updatedAt) return right.updatedAt > left.updatedAt ? right : left;
+  const normalizedLeft = migrateCollection(left);
+  const normalizedRight = migrateCollection(right);
+  if (normalizedRight.revision !== normalizedLeft.revision) return normalizedRight.revision > normalizedLeft.revision ? normalizedRight : normalizedLeft;
+  if (normalizedRight.updatedAt !== normalizedLeft.updatedAt) return normalizedRight.updatedAt > normalizedLeft.updatedAt ? normalizedRight : normalizedLeft;
   // Deterministic tie-breaker keeps both devices convergent when clocks collide.
-  return JSON.stringify(right) > JSON.stringify(left) ? right : left;
+  return collectionSignature(normalizedRight) > collectionSignature(normalizedLeft) ? normalizedRight : normalizedLeft;
 }
 
 function manifestFor(deviceId: string, bookmarks: Bookmark[], collections: Collection[], now = new Date().toISOString()): SyncManifest {
@@ -111,8 +150,8 @@ export class WebDavSyncEngine {
     const syncing: SyncMetadata = { ...before, status: 'syncing', error: undefined };
     await this.repository.setSyncMetadata(syncing);
     try {
-      const local = await this.repository.list({ includeDeleted: true });
-      const localCollections = await this.repository.listCollections();
+      const local = (await this.repository.list({ includeDeleted: true })).map((item) => migrateBookmark(item));
+      const localCollections = (await this.repository.listCollections()).map((item) => migrateCollection(item));
       let remoteSnapshot: RemoteSnapshot;
       try {
         remoteSnapshot = await this.client.read();
@@ -124,8 +163,8 @@ export class WebDavSyncEngine {
         if (status !== 404 && !/\b404\b|not found/i.test(message)) throw error;
         remoteSnapshot = {};
       }
-      const remote = remoteSnapshot.manifest?.bookmarks ?? [];
-      const remoteCollections = remoteSnapshot.manifest?.collections ?? [];
+      const remote = (remoteSnapshot.manifest?.bookmarks ?? []).map((item) => migrateBookmark(item));
+      const remoteCollections = (remoteSnapshot.manifest?.collections ?? []).map((item) => migrateCollection(item));
       const byId = new Map(local.map((item) => [item.id, item]));
       const remoteById = new Map(remote.map((item) => [item.id, item]));
       const merged = new Map<string, Bookmark>();
@@ -184,7 +223,7 @@ export class WebDavSyncEngine {
             bookmarkId: id,
             local: localItem,
             remote: remoteItem,
-            fields: ['url', 'title', 'notes', 'tags', 'collectionId', 'favorite', 'deletedAt'],
+            fields: ['url', 'title', 'notes', 'tags', 'collectionId', 'position', 'favorite', 'deletedAt'],
             createdAt: new Date().toISOString(),
           };
           conflicts.push(conflict);
@@ -199,7 +238,12 @@ export class WebDavSyncEngine {
       }
 
       const now = new Date().toISOString();
-      const manifest = manifestFor(before.deviceId, [...merged.values()], [...mergedCollections.values()], now);
+      const manifest = manifestFor(
+        before.deviceId,
+        [...merged.values()].map((item) => migrateBookmark(item)),
+        [...mergedCollections.values()].map((item) => migrateCollection(item)),
+        now,
+      );
       if (!conflicts.length) {
         const written = await this.client.write(manifest, remoteSnapshot.etag);
         const metadata: SyncMetadata = {

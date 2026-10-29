@@ -1,8 +1,11 @@
 import {
   Bookmark,
   Collection,
+  CURRENT_SCHEMA_VERSION,
   LumaMarkExport,
   makeBookmark,
+  migrateBookmark,
+  migrateCollection,
   migrateExport,
   normalizeUrl,
 } from '../../domain/src/index';
@@ -54,8 +57,14 @@ function id(): string {
   return crypto.randomUUID();
 }
 
-function makeCollection(name: string, parentId: string | undefined, position: number, now: string): Collection {
-  return { id: id(), name, parentId, position, createdAt: now, updatedAt: now, revision: 1 };
+function makeCollection(name: string, parentId: string | undefined, position: number, toolbar: boolean, now: string): Collection {
+  return { id: id(), name, parentId, position, toolbar, createdAt: now, updatedAt: now, revision: 1 };
+}
+
+const toolbarNames = ['书签栏', 'Bookmarks bar', 'Bookmarks Toolbar'];
+
+function hasToolbarAttribute(token: string): boolean {
+  return /\bPERSONAL_TOOLBAR_FOLDER\s*=\s*(?:"true"|'true'|true)(?=[\s>])/i.test(token);
 }
 
 /** Parse a LumaMark JSON backup while retaining all valid records after bad entries. */
@@ -97,6 +106,7 @@ export function parseLumaMarkJson(text: string): ImportResult {
             notes: item.notes,
             tags: item.tags,
             collectionId: item.collectionId,
+            position: typeof item.position === 'number' ? item.position : 0,
             favorite: item.favorite,
           }, item.createdAt),
           createdAt: item.createdAt,
@@ -108,7 +118,8 @@ export function parseLumaMarkJson(text: string): ImportResult {
         issues.push({ kind: 'invalid-entry', index, message: String(entryError) });
       }
     });
-    return { bookmarks: valid, collections: Array.isArray(raw?.collections) ? raw.collections : [], issues };
+    const collections = Array.isArray(raw?.collections) ? raw.collections.map((collection) => migrateCollection(collection as Collection)) : [];
+    return { bookmarks: valid, collections, issues };
   }
 }
 
@@ -118,9 +129,11 @@ export function parseBookmarksHtml(text: string): ImportResult {
   const collections: Collection[] = [];
   const bookmarks: Bookmark[] = [];
   const issues: ImportIssue[] = [];
-  const stack: Array<{ id: string; position: number }> = [];
+  const stack: Array<{ id?: string; nextPosition: number }> = [{ nextPosition: 0 }];
   const tokens = text.match(/<[^>]+>|[^<]+/g) ?? [];
   let pendingFolder: string | undefined;
+  let pendingToolbar = false;
+  let toolbarClaimed = false;
   let folderText = '';
   let inFolder = false;
   let anchorAttrs = '';
@@ -131,6 +144,7 @@ export function parseBookmarksHtml(text: string): ImportResult {
     if (/^<h3\b[^>]*>$/i.test(token)) {
       inFolder = true;
       folderText = '';
+      pendingToolbar = !toolbarClaimed && hasToolbarAttribute(token);
       continue;
     }
     if (/^<\/h3\b/i.test(token)) {
@@ -157,9 +171,10 @@ export function parseBookmarksHtml(text: string): ImportResult {
         issues.push({ kind: 'malformed-html', index: tokenIndex, message: 'Bookmark is missing an href' });
       } else {
         try {
-          const bookmark = makeBookmark({ url: decodeHtml(url), title, collectionId: stack.at(-1)?.id }, now);
+          const parent = stack[stack.length - 1];
+          const bookmark = makeBookmark({ url: decodeHtml(url), title, collectionId: parent.id, position: parent.nextPosition }, now);
           bookmarks.push(bookmark);
-          if (stack.length) stack[stack.length - 1].position += 1;
+          parent.nextPosition += 1;
         } catch (error) {
           issues.push({ kind: 'malformed-html', index: tokenIndex, message: String(error) });
         }
@@ -174,17 +189,30 @@ export function parseBookmarksHtml(text: string): ImportResult {
     }
     if (/^<dl\b/i.test(token)) {
       if (pendingFolder) {
-        const parentId = stack.at(-1)?.id;
-        const collection = makeCollection(pendingFolder, parentId, stack.at(-1)?.position ?? collections.length, now);
+        const parent = stack[stack.length - 1];
+        const toolbar = pendingToolbar;
+        if (toolbar) toolbarClaimed = true;
+        const collection = makeCollection(pendingFolder, parent.id, parent.nextPosition, toolbar, now);
+        parent.nextPosition += 1;
         collections.push(collection);
-        stack.push({ id: collection.id, position: 0 });
+        stack.push({ id: collection.id, nextPosition: 0 });
         pendingFolder = undefined;
+        pendingToolbar = false;
       }
       continue;
     }
     if (/^<\/dl\b/i.test(token)) {
-      stack.pop();
+      if (stack.length > 1) stack.pop();
       continue;
+    }
+  }
+  if (!toolbarClaimed) {
+    for (const name of toolbarNames) {
+      const match = collections.find((collection) => collection.parentId === undefined && collection.name === name);
+      if (match) {
+        match.toolbar = true;
+        break;
+      }
     }
   }
   if (pendingFolder) issues.push({ kind: 'malformed-html', message: `Folder without content: ${pendingFolder}` });
@@ -194,7 +222,13 @@ export function parseBookmarksHtml(text: string): ImportResult {
 }
 
 export function exportLumaMarkJson(bookmarks: Bookmark[], collections: Collection[], now = new Date().toISOString()): string {
-  const payload: LumaMarkExport = { format: 'lumamark', schemaVersion: 1, exportedAt: now, bookmarks, collections };
+  const payload: LumaMarkExport = {
+    format: 'lumamark',
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    exportedAt: now,
+    bookmarks: bookmarks.map((bookmark) => migrateBookmark(bookmark)),
+    collections: collections.map((collection) => migrateCollection(collection)),
+  };
   return JSON.stringify(payload, null, 2);
 }
 

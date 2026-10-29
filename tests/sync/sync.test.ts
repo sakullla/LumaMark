@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Bookmark, BookmarkRepository, Collection, SyncMetadata } from '../../packages/domain/src/index';
 import { SyncRepository, SyncManifest, WebDavClient, WebDavSyncEngine } from '../../packages/sync/src/index';
 
-function bookmark(id: string, title: string, revision = 1, updatedAt = '2024-01-01T00:00:00.000Z'): Bookmark {
+function bookmark(id: string, title: string, revision = 1, updatedAt = '2024-01-01T00:00:00.000Z', position = 0): Bookmark {
   return {
     id,
     url: `https://example.com/${id}`,
@@ -14,6 +14,7 @@ function bookmark(id: string, title: string, revision = 1, updatedAt = '2024-01-
     createdAt: updatedAt,
     updatedAt,
     revision,
+    position,
   };
 }
 
@@ -54,8 +55,23 @@ class MemoryClient implements WebDavClient {
 }
 
 describe('WebDavSyncEngine', () => {
-  const collection = (id: string, name: string, revision = 1, updatedAt = '2024-01-01T00:00:00.000Z', deletedAt?: string): Collection => ({
-    id, name, position: 0, createdAt: '2024-01-01T00:00:00.000Z', updatedAt, revision, ...(deletedAt ? { deletedAt } : {}),
+  const collection = (
+    id: string,
+    name: string,
+    revision = 1,
+    updatedAt = '2024-01-01T00:00:00.000Z',
+    deletedAt?: string,
+    extras: { position?: number; toolbar?: boolean; parentId?: string } = {},
+  ): Collection => ({
+    id,
+    name,
+    position: extras.position ?? 0,
+    toolbar: extras.toolbar ?? false,
+    ...(extras.parentId ? { parentId: extras.parentId } : {}),
+    createdAt: '2024-01-01T00:00:00.000Z',
+    updatedAt,
+    revision,
+    ...(deletedAt ? { deletedAt } : {}),
   });
 
   it('uploads local changes and imports remote-only records', async () => {
@@ -177,7 +193,9 @@ describe('WebDavSyncEngine', () => {
     const result = await new WebDavSyncEngine(repository, client).sync();
     expect(result.status).toBe('idle');
     expect(client.snapshot.manifest?.format).toBe('lumamark-sync');
+    expect(client.snapshot.manifest?.schemaVersion).toBe(2);
     expect(client.snapshot.manifest?.bookmarks.map((item) => item.id)).toEqual(['local']);
+    expect(await repository.findById('local')).toBeTruthy();
   });
 
   it('converges edited and deleted collections by newer revision', async () => {
@@ -202,6 +220,131 @@ describe('WebDavSyncEngine', () => {
     await new WebDavSyncEngine(repository, client).sync();
     expect((await repository.listCollections())[0].deletedAt).toBe('2024-01-03T00:00:00.000Z');
     expect(client.snapshot.manifest?.collections[0].deletedAt).toBe('2024-01-03T00:00:00.000Z');
+  });
+
+  it('reads schema 1 manifests that omit position and toolbar, then writes schema 2', async () => {
+    const repository = new MemoryRepository();
+    await repository.put(bookmark('local', 'Local'));
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync',
+      schemaVersion: 1,
+      generatedAt: '2024-01-01T00:00:00.000Z',
+      deviceId: 'device-b',
+      bookmarks: [{
+        id: 'remote',
+        url: 'https://example.com/remote',
+        title: 'Remote',
+        domain: 'example.com',
+        notes: '',
+        tags: [],
+        favorite: false,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z',
+        revision: 1,
+      }],
+      collections: [{
+        id: 'remote-folder',
+        name: 'Remote folder',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: '2024-01-01T00:00:00.000Z',
+        revision: 1,
+      }],
+    } as unknown as SyncManifest;
+    const result = await new WebDavSyncEngine(repository, client).sync();
+    expect(result.status).toBe('idle');
+    expect((await repository.list()).map((item) => item.id).sort()).toEqual(['local', 'remote']);
+    expect((await repository.findById('remote'))?.position).toBe(0);
+    expect((await repository.listCollections())[0]).toMatchObject({ id: 'remote-folder', name: 'Remote folder', position: 0, toolbar: false });
+    expect(client.snapshot.manifest?.schemaVersion).toBe(2);
+    expect(client.snapshot.manifest?.bookmarks).toHaveLength(2);
+    expect(client.snapshot.manifest?.bookmarks.every((item) => item.position === 0)).toBe(true);
+    expect(client.snapshot.manifest?.collections[0].toolbar).toBe(false);
+  });
+
+  it('keeps both sides of a position-only bookmark conflict until one is chosen', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put(bookmark('same', 'Same', 2, '2024-01-02T00:00:00.000Z', 1));
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync',
+      schemaVersion: 2,
+      generatedAt: '2024-01-03T00:00:00.000Z',
+      deviceId: 'device-b',
+      bookmarks: [bookmark('same', 'Same', 2, '2024-01-03T00:00:00.000Z', 5)],
+      collections: [],
+    };
+    const engine = new WebDavSyncEngine(repository, client);
+    const result = await engine.sync();
+    expect(result.status).toBe('conflict');
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].local.position).toBe(1);
+    expect(result.conflicts[0].remote.position).toBe(5);
+    expect(result.conflicts[0].fields).toContain('position');
+    expect((await repository.findById('same'))?.position).toBe(1);
+    expect(client.snapshot.manifest?.bookmarks[0].position).toBe(5);
+    await engine.resolveConflict(result.conflicts[0].id, 'remote');
+    expect((await repository.findById('same'))?.position).toBe(5);
+    expect((await repository.findById('same'))?.title).toBe('Same');
+  });
+
+  it('lets the newer folder record win toolbar and position', async () => {
+    const repository = new MemoryRepository();
+    await repository.putCollection(collection('folder', 'Folder', 1, '2024-01-01T00:00:00.000Z', undefined, { position: 1, toolbar: false }));
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync',
+      schemaVersion: 2,
+      generatedAt: '2024-01-03T00:00:00.000Z',
+      deviceId: 'device-b',
+      bookmarks: [],
+      collections: [collection('folder', 'Folder', 3, '2024-01-02T00:00:00.000Z', undefined, { position: 4, toolbar: true })],
+    };
+    await new WebDavSyncEngine(repository, client).sync();
+    expect((await repository.listCollections())[0]).toMatchObject({ position: 4, toolbar: true, revision: 3 });
+    expect(client.snapshot.manifest?.collections[0]).toMatchObject({ position: 4, toolbar: true });
+
+    await repository.putCollection(collection('folder', 'Folder', 3, '2024-01-02T00:00:00.000Z', undefined, { position: 4, toolbar: true }));
+    client.snapshot.manifest = {
+      ...client.snapshot.manifest!,
+      collections: [collection('folder', 'Folder', 3, '2024-01-04T00:00:00.000Z', undefined, { position: 8, toolbar: false })],
+    };
+    await new WebDavSyncEngine(repository, client).sync();
+    expect((await repository.listCollections())[0]).toMatchObject({ position: 8, toolbar: false });
+    expect(client.snapshot.manifest?.collections[0]).toMatchObject({ position: 8, toolbar: false });
+  });
+
+  it('propagates bookmark and folder tombstones so the other side stays deleted', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put({ ...bookmark('gone', 'Gone', 2, '2024-01-02T00:00:00.000Z'), deletedAt: '2024-01-02T00:00:00.000Z' });
+    await repository.putCollection(collection('gone-folder', 'Gone folder', 2, '2024-01-02T00:00:00.000Z', '2024-01-02T00:00:00.000Z'));
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync',
+      schemaVersion: 2,
+      generatedAt: '2024-01-01T00:00:00.000Z',
+      deviceId: 'device-b',
+      bookmarks: [bookmark('gone', 'Gone', 1, '2024-01-01T00:00:00.000Z')],
+      collections: [collection('gone-folder', 'Gone folder', 1, '2024-01-01T00:00:00.000Z')],
+    };
+    const result = await new WebDavSyncEngine(repository, client).sync();
+    expect(result.status).toBe('idle');
+    expect(client.snapshot.manifest?.schemaVersion).toBe(2);
+    expect(client.snapshot.manifest?.bookmarks[0].deletedAt).toBe('2024-01-02T00:00:00.000Z');
+    expect(client.snapshot.manifest?.collections[0].deletedAt).toBe('2024-01-02T00:00:00.000Z');
+
+    const other = new MemoryRepository();
+    other.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await other.put(bookmark('gone', 'Gone', 1, '2024-01-01T00:00:00.000Z'));
+    await other.putCollection(collection('gone-folder', 'Gone folder', 1, '2024-01-01T00:00:00.000Z'));
+    const follow = new MemoryClient();
+    follow.snapshot = { manifest: client.snapshot.manifest, etag: client.snapshot.etag };
+    await new WebDavSyncEngine(other, follow).sync();
+    expect((await other.findById('gone'))?.deletedAt).toBe('2024-01-02T00:00:00.000Z');
+    expect((await other.listCollections())[0].deletedAt).toBe('2024-01-02T00:00:00.000Z');
+    expect((await other.findById('gone'))?.title).toBe('Gone');
   });
 });
 
