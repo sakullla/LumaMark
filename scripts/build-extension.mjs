@@ -34,9 +34,10 @@ async function bundleSource(entryPoint, outfile) {
 }
 
 const pageEntries = {
-  popup: { title: 'LumaMark', documentExport: 'popupDocument', mount: 'mountPopup', module: './apps/extension/src/pages/popup.ts' },
-  library: { title: 'LumaMark Library', documentExport: 'libraryDocument', mount: 'mountLibrary', module: './apps/extension/src/pages/library.ts' },
-  settings: { title: 'LumaMark Settings', documentExport: 'settingsDocument', mount: 'mountSettings', module: './apps/extension/src/pages/settings.ts' },
+  popup: { title: 'LumaMark', documentExport: 'popupDocument', call: 'popupDocument(language)', mount: 'mountPopup', module: './apps/extension/src/pages/popup.ts' },
+  library: { title: 'LumaMark Library', documentExport: 'libraryDocument', call: 'libraryDocument([], language)', mount: 'mountLibrary', module: './apps/extension/src/pages/library.ts' },
+  settings: { title: 'LumaMark Settings', documentExport: 'settingsDocument', call: 'settingsDocument(language)', mount: 'mountSettings', module: './apps/extension/src/pages/settings.ts' },
+  home: { title: 'LumaMark', documentExport: 'homeDocument', call: 'homeDocument(language)', mount: 'mountHome', module: './apps/extension/src/pages/home.ts' },
 };
 
 for (const target of ['chrome', 'firefox', 'safari']) {
@@ -54,12 +55,15 @@ for (const target of ['chrome', 'firefox', 'safari']) {
   for (const [name, page] of Object.entries(pageEntries)) {
     const entry = `
       import { ${page.documentExport}, ${page.mount} } from '${page.module}';
+      import { detectUiLanguage } from './apps/extension/src/ui/copy.ts';
       import css from './apps/extension/src/styles/main.css';
       const start = () => {
+        const language = detectUiLanguage();
+        document.documentElement.lang = language === 'zh' ? 'zh' : 'en';
         const style = document.createElement('style');
         style.textContent = css;
         document.head.append(style);
-        document.body.innerHTML = ${page.documentExport}();
+        document.body.innerHTML = ${page.call};
         ${page.mount}(document);
       };
       if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });

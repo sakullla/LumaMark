@@ -1,8 +1,33 @@
 import { IndexedDbRepository } from '../../../../packages/storage/src/index';
-import { BookmarkService, Collection, type BookmarkRepository, type SyncConfig } from '../../../../packages/domain/src/index';
+import {
+  applyBookmarkUpdate,
+  assignToolbar,
+  BookmarkService,
+  Collection,
+  domainFromUrl,
+  normalizeUrl,
+  type Bookmark,
+  type BookmarkRepository,
+  type CreateBookmarkInput,
+  type DuplicateAction,
+  type SyncConfig,
+} from '../../../../packages/domain/src/index';
 import { exportLumaMarkJson, parseBookmarksHtml, parseLumaMarkJson, planImport, type DuplicateImportAction, type ImportPlan } from '../../../../packages/import-export/src/index';
 import { WebDavSyncEngine, type WebDavClient, type SyncManifest } from '../../../../packages/sync/src/index';
-import { captureActivePage, notifySaveResult, registerSaveEntrypoints, resolveExtensionApi } from '../../../../packages/browser/src/index';
+import {
+  captureActivePage,
+  isSavablePageUrl,
+  notifyMessage,
+  notifySaveResult,
+  registerSaveEntrypoints,
+  resolveExtensionApi,
+  type SaveMenuInfo,
+  type WebExtensionApi,
+} from '../../../../packages/browser/src/index';
+import { copyFor, languageFromApi, notificationCopy } from '../ui/copy';
+import { DEFAULT_SEARCH_URL, nextSiblingPosition, normalizeSearchUrl, toolbarFolder } from '../ui/bar';
+import { placeItem } from './place';
+import { probeWebDav } from './probe';
 
 function webDavClient(config: SyncConfig): WebDavClient {
   const endpoint = `${config.url.replace(/\/$/, '')}/${config.path.replace(/^\//, '')}`;
@@ -37,6 +62,7 @@ export async function applyImportPlan(plan: ImportPlan, service: BookmarkService
         notes: entry.bookmark.notes,
         tags: entry.bookmark.tags,
         collectionId: entry.bookmark.collectionId,
+        position: entry.bookmark.position,
         favorite: entry.bookmark.favorite,
       });
     } else {
@@ -46,34 +72,111 @@ export async function applyImportPlan(plan: ImportPlan, service: BookmarkService
   return plan.entries.length;
 }
 
+const SEARCH_KEY = 'searchUrl';
+
 export function startBackground(api = resolveExtensionApi(), repository = new IndexedDbRepository()): void {
   const service = new BookmarkService(repository);
   let syncConfig: SyncConfig | undefined;
   let autoSyncTimer: ReturnType<typeof setTimeout> | undefined;
+  let memorySearchUrl = DEFAULT_SEARCH_URL;
   let lastUndo: () => Promise<void> = async () => undefined;
-  let lastSavePage: Awaited<ReturnType<typeof captureActivePage>> | undefined;
+  let lastSavePage: { url: string; title?: string; faviconUrl?: string } | undefined;
   let lastSaveOptions: { collectionId?: string; tags?: string[]; notes?: string } = {};
-  const openLibrary = async () => {
-    const url = api.runtime?.getURL?.('library.html') ?? 'library.html';
+  const notices = () => notificationCopy(languageFromApi(api));
+  const openExtensionPage = async (page: string) => {
+    const url = api.runtime?.getURL?.(page) ?? page;
     await api.tabs.create?.({ url });
   };
-  const save = async (options: { collectionId?: string; tags?: string[]; notes?: string } = {}) => {
-    const page = await captureActivePage(api);
-    lastSavePage = page;
-    lastSaveOptions = options;
-    const result = await service.save({ ...page, collectionId: options.collectionId, tags: options.tags, notes: options.notes }, 'existing');
-    lastUndo = result.kind === 'saved'
-      ? async () => { await service.remove(result.bookmark.id); }
-      : async () => undefined;
-    await notifySaveResult(api, result, {
-      openLibrary,
-      undo: lastUndo,
-      openExisting: openLibrary,
-      updateExisting: async () => { if (result.kind === 'existing') await service.save(page, 'update'); },
-      copyExisting: async () => { if (result.kind === 'existing') await service.save(page, 'copy'); },
-    });
-    return result;
+  const notifyUnsavable = async () => {
+    const copy = notices();
+    await notifyMessage(api, copy.unsavableTitle, copy.unsavableMessage);
   };
+  const notifyFailed = async () => {
+    const copy = notices();
+    await notifyMessage(api, copy.failedTitle, copy.failedMessage);
+  };
+  const defaultCollectionId = async () => toolbarFolder(await repository.listCollections())?.id;
+  const readSearchUrl = async () => {
+    try {
+      const stored = await api.storage?.local.get(SEARCH_KEY);
+      const value = stored?.[SEARCH_KEY];
+      if (typeof value === 'string') memorySearchUrl = normalizeSearchUrl(value);
+    } catch { /* keep the last address loaded on this browser */ }
+    return memorySearchUrl;
+  };
+  const writeSearchUrl = async (value: string) => {
+    memorySearchUrl = normalizeSearchUrl(value);
+    if (api.storage?.local) await api.storage.local.set({ [SEARCH_KEY]: memorySearchUrl });
+    return memorySearchUrl;
+  };
+
+  const saveTarget = async (
+    input: { url: string; title?: string; faviconUrl?: string; tags?: string[]; notes?: string; collectionId?: string | null },
+    duplicate: DuplicateAction = 'existing',
+  ) => {
+    if (!isSavablePageUrl(input.url)) {
+      await notifyUnsavable();
+      return { ok: false as const, unsavable: true };
+    }
+    lastSavePage = { url: input.url, title: input.title, faviconUrl: input.faviconUrl };
+    lastSaveOptions = { tags: input.tags, notes: input.notes, collectionId: input.collectionId ?? undefined };
+    try {
+      const draft: CreateBookmarkInput = {
+        url: input.url,
+        title: input.title,
+        faviconUrl: input.faviconUrl,
+        notes: input.notes,
+        tags: input.tags,
+      };
+      if (duplicate !== 'update') {
+        draft.collectionId = input.collectionId === undefined ? await defaultCollectionId() : input.collectionId ?? undefined;
+        draft.position = nextSiblingPosition(draft.collectionId, await repository.list({ includeDeleted: true }), await repository.listCollections());
+      } else if (input.collectionId !== undefined) {
+        draft.collectionId = input.collectionId ?? undefined;
+      }
+      const result = await service.save(draft, duplicate);
+      const copy = notices();
+      lastUndo = result.kind === 'saved' ? async () => { await service.remove(result.bookmark.id); } : async () => undefined;
+      await notifySaveResult(api, result, {
+        openLibrary: () => openExtensionPage('library.html'),
+        undo: lastUndo,
+        openExisting: async () => { if (result.kind === 'existing') await api.tabs.create?.({ url: result.existing.url }); },
+        updateExisting: async () => {
+          if (result.kind === 'existing') await service.save({ url: input.url, title: input.title, faviconUrl: input.faviconUrl, notes: input.notes, tags: input.tags }, 'update');
+        },
+        copyExisting: async () => {
+          if (result.kind !== 'existing') return;
+          const collectionId = await defaultCollectionId();
+          const position = nextSiblingPosition(collectionId, await repository.list({ includeDeleted: true }), await repository.listCollections());
+          await service.save({ url: input.url, title: input.title, faviconUrl: input.faviconUrl, notes: input.notes, tags: input.tags, collectionId, position }, 'copy');
+        },
+      }, copy);
+      return { ok: true as const, result };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/only http|url is required/i.test(message)) {
+        await notifyUnsavable();
+        return { ok: false as const, unsavable: true };
+      }
+      await notifyFailed();
+      return { ok: false as const, error: message };
+    }
+  };
+
+  const saveFromMenu = async (info?: SaveMenuInfo) => {
+    if (info?.linkUrl) {
+      const title = info.linkText?.trim() || info.selectionText?.trim() || info.linkUrl;
+      await saveTarget({ url: info.linkUrl, title });
+      return;
+    }
+    try {
+      const page = await captureActivePage(api);
+      await saveTarget(page);
+    } catch {
+      await notifyUnsavable();
+    }
+  };
+
   const loadSyncConfig = async () => {
     syncConfig = await repository.getSyncConfig();
     return syncConfig;
@@ -93,112 +196,252 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
     }, 5 * 60 * 1000);
   };
   void loadSyncConfig().then(scheduleAutoSync);
-  registerSaveEntrypoints(api, async () => { await save(); });
+  registerSaveEntrypoints(api, saveFromMenu, copyFor(languageFromApi(api)).contextSave);
+
   api.runtime?.onMessage?.addListener((message: unknown, _sender: unknown, sendResponse) => {
     const type = typeof message === 'object' && message !== null && 'type' in message
       ? (message as { type?: string }).type : undefined;
-    const payload = (message as { payload?: any }).payload ?? {};
-    if (type === 'lumamark-save') { void save(payload).then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
-    if (type === 'lumamark-open-library') { void openLibrary().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
-    if (type === 'lumamark-undo') { void lastUndo().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
-    if (type === 'lumamark-update-existing' || type === 'lumamark-copy-existing') {
-      void (async () => {
-        if (!lastSavePage) throw new Error('No existing save to act on');
-        const result = await service.save({ ...lastSavePage, ...lastSaveOptions, ...(payload ?? {}) }, type === 'lumamark-update-existing' ? 'update' : 'copy');
-        return result;
-      })().then((result) => sendResponse({ ok: true, result })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-list') {
-      const payload = (message as { payload?: { text?: string; includeDeleted?: boolean } }).payload;
-      void repository.list({ includeDeleted: payload?.includeDeleted ?? false, text: payload?.text }).then((items) => sendResponse({ ok: true, items }));
+    const payload = (message as { payload?: Record<string, any> }).payload ?? {};
+    const accept = (work: () => Promise<unknown>) => {
+      void work().then(sendResponse).catch((error) => {
+        const messageText = error instanceof Error ? error.message : String(error);
+        const unsavable = /only http|unable to read the active page|url is required/i.test(messageText);
+        sendResponse({ ok: false, error: unsavable ? 'unsavable' : messageText, unsavable });
+      });
       return true;
-    }
-    if (type === 'lumamark-list-collections') { void repository.listCollections().then((items) => sendResponse({ ok: true, items })); return true; }
-    if (type === 'lumamark-collection-create') {
+    };
+
+    if (type === 'lumamark-save') return accept(async () => {
+      try {
+        const page = await captureActivePage(api);
+        return await saveTarget({
+          url: page.url,
+          title: page.title,
+          faviconUrl: page.faviconUrl,
+          tags: Array.isArray(payload.tags) ? payload.tags : undefined,
+          notes: payload.notes !== undefined ? String(payload.notes) : undefined,
+          collectionId: payload.collectionId ? String(payload.collectionId) : undefined,
+        });
+      } catch {
+        await notifyUnsavable();
+        return { ok: false, unsavable: true };
+      }
+    });
+    if (type === 'lumamark-capture') return accept(async () => {
+      try {
+        const page = await captureActivePage(api);
+        lastSavePage = page;
+        const savable = isSavablePageUrl(page.url);
+        const found = savable ? await repository.findByUrl(normalizeUrl(page.url)) : undefined;
+        return { ok: true, page, savable, existing: found && !found.deletedAt ? found : undefined };
+      } catch {
+        return { ok: true, page: {}, savable: false, unsavable: true };
+      }
+    });
+    if (type === 'lumamark-open-library') return accept(async () => { await openExtensionPage('library.html'); return { ok: true }; });
+    if (type === 'lumamark-open-home') return accept(async () => { await openExtensionPage('home.html'); return { ok: true }; });
+    if (type === 'lumamark-open-existing') return accept(async () => {
+      const url = typeof payload.url === 'string' && payload.url ? payload.url : lastSavePage?.url;
+      if (!url || !isSavablePageUrl(url)) return { ok: false, unsavable: true };
+      await api.tabs.create?.({ url });
+      return { ok: true };
+    });
+    if (type === 'lumamark-undo') return accept(async () => { await lastUndo(); return { ok: true }; });
+    if (type === 'lumamark-update-existing' || type === 'lumamark-copy-existing') return accept(async () => {
+      if (!lastSavePage?.url) return { ok: false, unsavable: true };
+      return saveTarget({
+        url: lastSavePage.url,
+        title: payload.title ? String(payload.title) : lastSavePage.title,
+        faviconUrl: lastSavePage.faviconUrl,
+        tags: Array.isArray(payload.tags) ? payload.tags : lastSaveOptions.tags,
+        notes: payload.notes !== undefined ? String(payload.notes) : lastSaveOptions.notes,
+        collectionId: payload.collectionId === undefined ? lastSaveOptions.collectionId : payload.collectionId,
+      }, type === 'lumamark-update-existing' ? 'update' : 'copy');
+    });
+    if (type === 'lumamark-list') return accept(async () => {
+      const items = await repository.list({ includeDeleted: payload.includeDeleted ?? false, text: payload.text });
+      return { ok: true, items };
+    });
+    if (type === 'lumamark-list-collections') return accept(async () => ({ ok: true, items: await repository.listCollections() }));
+    if (type === 'lumamark-collection-create') return accept(async () => {
       const now = new Date().toISOString();
-      const collection: Collection = { id: crypto.randomUUID(), name: String(payload.name ?? '').trim() || 'New collection', position: Date.now(), createdAt: now, updatedAt: now, revision: 1 };
-      void repository.putCollection(collection).then(() => sendResponse({ ok: true, item: collection })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-collection-delete') {
-      void repository.listCollections().then(async (items) => {
-        const current = items.find((item) => item.id === payload.id); if (!current) throw new Error('Collection not found');
-        const deleted = { ...current, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), revision: current.revision + 1 };
-        await repository.putCollection(deleted); return deleted;
-      }).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-collection-restore') {
-      void repository.listCollections().then(async (items) => {
-        const current = items.find((item) => item.id === payload.id); if (!current) throw new Error('Collection not found');
-        const restored = { ...current, deletedAt: undefined, updatedAt: new Date().toISOString(), revision: current.revision + 1 };
-        await repository.putCollection(restored); return restored;
-      }).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-list-conflicts') { void repository.listConflicts().then((items) => sendResponse({ ok: true, items })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
-    if (type === 'lumamark-sync-status') { void repository.getSyncMetadata().then((metadata) => sendResponse({ ok: true, metadata })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
-    if (type === 'lumamark-resolve-conflict') {
-      void (async () => {
-        const config = syncConfig ?? await loadSyncConfig(); if (!config?.url) throw new Error('WebDAV is not configured');
-        const engine = new WebDavSyncEngine(repository, webDavClient(config));
-        return engine.resolveConflict(String(payload.id), payload.resolution, payload.merged);
-      })().then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-favorite') {
-      void (async () => {
-        const current = await repository.findById(payload.id);
-        if (!current) throw new Error('Bookmark not found');
-        return service.update(payload.id, { favorite: payload.favorite ?? !current.favorite });
-      })().then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-update') {
-      const ids = Array.isArray(payload.ids) ? payload.ids : [payload.id];
-      void Promise.all(ids.filter(Boolean).map((id: string) => service.update(id, payload.update ?? {}))).then((items) => sendResponse({ ok: true, items })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-delete') {
-      const ids = Array.isArray(payload.ids) ? payload.ids : [payload.id];
-      let removed: string[] = [];
-      void Promise.all(ids.filter(Boolean).map((id: string) => service.remove(id))).then((items) => {
-        removed = items.map((item) => item.id);
-        lastUndo = async () => { for (const id of removed) await service.restore(id); };
-        sendResponse({ ok: true, items });
-      }).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-restore') { void service.restore(payload.id).then((item) => sendResponse({ ok: true, item })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true; }
-    if (type === 'lumamark-sync-configure') {
-      syncConfig = { key: 'sync-config', url: String(payload.url ?? ''), path: String(payload.path ?? 'lumamark.json'), username: payload.username ? String(payload.username) : undefined, password: payload.password ? String(payload.password) : undefined, autoSync: Boolean(payload.autoSync) };
-      void repository.setSyncConfig(syncConfig).then(() => repository.getSyncMetadata()).then((metadata) => repository.setSyncMetadata({ ...metadata, autoSync: syncConfig!.autoSync, status: 'idle', error: undefined })).then(() => { scheduleAutoSync(); sendResponse({ ok: true }); }).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-sync') {
-      void (async () => {
-        const config = syncConfig ?? await loadSyncConfig();
-        if (!config?.url) { sendResponse({ ok: false, status: 'error', error: 'WebDAV is not configured' }); return; }
-        const result = await new WebDavSyncEngine(repository, webDavClient(config)).sync();
-        if (result.status === 'error' && config.autoSync) {
-          syncConfig = { ...config, autoSync: false };
-          await repository.setSyncConfig(syncConfig);
-          const metadata = await repository.getSyncMetadata();
-          await repository.setSyncMetadata({ ...metadata, autoSync: false });
+      const collection: Collection = { id: crypto.randomUUID(), name: String(payload.name ?? '').trim() || 'New collection', position: Date.now(), toolbar: false, createdAt: now, updatedAt: now, revision: 1 };
+      await repository.putCollection(collection);
+      return { ok: true, item: collection };
+    });
+    if (type === 'lumamark-collection-delete') return accept(async () => {
+      const items = await repository.listCollections();
+      const current = items.find((item) => item.id === payload.id);
+      if (!current) throw new Error('Collection not found');
+      const deleted = { ...current, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), revision: current.revision + 1 };
+      await repository.putCollection(deleted);
+      return { ok: true, item: deleted };
+    });
+    if (type === 'lumamark-collection-restore') return accept(async () => {
+      const items = await repository.listCollections();
+      const current = items.find((item) => item.id === payload.id);
+      if (!current) throw new Error('Collection not found');
+      const restored = { ...current, deletedAt: undefined, updatedAt: new Date().toISOString(), revision: current.revision + 1 };
+      await repository.putCollection(restored);
+      return { ok: true, item: restored };
+    });
+    if (type === 'lumamark-list-conflicts') return accept(async () => ({ ok: true, items: await repository.listConflicts() }));
+    if (type === 'lumamark-sync-status') return accept(async () => ({ ok: true, metadata: await repository.getSyncMetadata() }));
+    if (type === 'lumamark-resolve-conflict') return accept(async () => {
+      const config = syncConfig ?? await loadSyncConfig();
+      if (!config?.url) throw new Error('WebDAV is not configured');
+      const item = await new WebDavSyncEngine(repository, webDavClient(config)).resolveConflict(String(payload.id), payload.resolution, payload.merged);
+      return { ok: true, item };
+    });
+    if (type === 'lumamark-favorite') return accept(async () => {
+      const current = await repository.findById(String(payload.id));
+      if (!current) throw new Error('Bookmark not found');
+      const item = await service.update(String(payload.id), { favorite: payload.favorite ?? !current.favorite });
+      return { ok: true, item };
+    });
+    if (type === 'lumamark-update') return accept(async () => {
+      const ids = (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map(String);
+      const update = payload.update ?? {};
+      try {
+        const url = update.url !== undefined ? normalizeUrl(String(update.url)) : undefined;
+        const items: Bookmark[] = [];
+        for (const id of ids) {
+          const current = await repository.findById(id);
+          if (!current) throw new Error('Bookmark not found');
+          const next = applyBookmarkUpdate(current, {
+            title: update.title,
+            notes: update.notes,
+            tags: update.tags,
+            collectionId: update.collectionId,
+            position: update.position,
+            favorite: update.favorite,
+            faviconUrl: update.faviconUrl,
+          });
+          const stored = { ...next, url: url ?? next.url, domain: domainFromUrl(url ?? next.url) };
+          await repository.put(stored);
+          items.push(stored);
         }
-        sendResponse(result);
-      })(); return true;
-    }
-    if (type === 'lumamark-export') {
-      void Promise.all([repository.list({ includeDeleted: true }), repository.listCollections()]).then(([bookmarks, collections]) => sendResponse({ ok: true, content: exportLumaMarkJson(bookmarks, collections) })).catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
-    if (type === 'lumamark-import') {
-      void (async () => {
-        const parsed = payload.format === 'html' ? parseBookmarksHtml(String(payload.content ?? '')) : parseLumaMarkJson(String(payload.content ?? ''));
-        const existing = await repository.list({ includeDeleted: true });
-        const action = (['skip', 'update', 'copy'] as const).includes(payload.action) ? payload.action as DuplicateImportAction : 'skip';
-        const plan = planImport(parsed, existing, action);
-        await applyImportPlan(plan, service, repository);
-        for (const collection of parsed.collections as Collection[]) await repository.putCollection(collection);
-        sendResponse({ ok: true, issues: plan.issues, imported: plan.entries.length, duplicateAction: action, choices: plan.issues.filter((issue) => issue.kind === 'duplicate').length });
-      })().catch((error) => sendResponse({ ok: false, error: String(error) })); return true;
-    }
+        return { ok: true, items };
+      } catch (error) {
+        const invalid = /only http|url is required/i.test(String(error));
+        return { ok: false, error: invalid ? 'invalid-url' : String(error) };
+      }
+    });
+    if (type === 'lumamark-delete') return accept(async () => {
+      const ids = (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map(String);
+      const items = [];
+      for (const id of ids) items.push(await service.remove(id));
+      const removed = items.map((item) => item.id);
+      lastUndo = async () => { for (const id of removed) await service.restore(id); };
+      return { ok: true, items };
+    });
+    if (type === 'lumamark-restore') return accept(async () => ({ ok: true, item: await service.restore(String(payload.id)) }));
+    if (type === 'lumamark-reorder') return accept(async () => {
+      await placeItem(repository, {
+        kind: payload.kind === 'folder' ? 'folder' : 'bookmark',
+        id: String(payload.id),
+        parentId: payload.parentId ? String(payload.parentId) : undefined,
+        beforeId: payload.beforeId ? String(payload.beforeId) : undefined,
+      });
+      return { ok: true };
+    });
+    if (type === 'lumamark-set-toolbar') return accept(async () => {
+      const items = await repository.listCollections();
+      const id = payload.id ? String(payload.id) : undefined;
+      if (id && !items.some((item) => item.id === id && !item.deletedAt)) throw new Error('Folder not found');
+      const next = assignToolbar(items, id);
+      for (const collection of next) {
+        const previous = items.find((item) => item.id === collection.id);
+        if (!previous) continue;
+        const before = previous.toolbar === true;
+        if (before === collection.toolbar && previous.revision === collection.revision) continue;
+        await repository.putCollection(collection);
+      }
+      return { ok: true };
+    });
+    if (type === 'lumamark-get-search-engine') return accept(async () => ({ ok: true, url: await readSearchUrl() }));
+    if (type === 'lumamark-set-search-engine') return accept(async () => ({ ok: true, url: await writeSearchUrl(String(payload.url ?? '')) }));
+    if (type === 'lumamark-get-sync-config') return accept(async () => {
+      const config = syncConfig ?? await loadSyncConfig();
+      return {
+        ok: true,
+        config: {
+          url: config?.url ?? '',
+          path: config?.path ?? '',
+          username: config?.username ?? '',
+          autoSync: Boolean(config?.autoSync),
+          configured: Boolean(config?.url),
+        },
+      };
+    });
+    if (type === 'lumamark-set-auto-sync') return accept(async () => {
+      const current = syncConfig ?? await loadSyncConfig();
+      if (!current?.url) return { ok: true, autoSync: false };
+      syncConfig = { ...current, autoSync: Boolean(payload.autoSync) };
+      await repository.setSyncConfig(syncConfig);
+      const metadata = await repository.getSyncMetadata();
+      await repository.setSyncMetadata({ ...metadata, autoSync: syncConfig.autoSync });
+      scheduleAutoSync();
+      return { ok: true, autoSync: syncConfig.autoSync };
+    });
+    if (type === 'lumamark-sync-configure') return accept(async () => {
+      const url = String(payload.url ?? '').trim();
+      const path = String(payload.path ?? 'lumamark.json').trim() || 'lumamark.json';
+      const username = payload.username ? String(payload.username) : undefined;
+      const previous = syncConfig ?? await repository.getSyncConfig();
+      // An empty field must not wipe the stored secret; the page never redisplays it.
+      const password = payload.password ? String(payload.password) : previous?.password;
+      if (!url) {
+        syncConfig = { key: 'sync-config', url: '', path, username, password, autoSync: false };
+        await repository.setSyncConfig(syncConfig);
+        const metadata = await repository.getSyncMetadata();
+        await repository.setSyncMetadata({ ...metadata, autoSync: false, status: 'idle', error: undefined });
+        scheduleAutoSync();
+        return { ok: true, probe: 'empty', autoSync: false };
+      }
+      const probe = await probeWebDav({ url, path, username, password });
+      const autoSync = probe.kind === 'ok';
+      syncConfig = { key: 'sync-config', url, path, username, password, autoSync };
+      await repository.setSyncConfig(syncConfig);
+      const metadata = await repository.getSyncMetadata();
+      await repository.setSyncMetadata({
+        ...metadata,
+        autoSync,
+        status: probe.kind === 'ok' ? 'idle' : probe.kind === 'unreachable' ? 'offline' : 'error',
+        error: probe.kind === 'ok' ? undefined : probe.kind,
+      });
+      scheduleAutoSync();
+      return { ok: true, probe: probe.kind, autoSync, status: probe.status };
+    });
+    if (type === 'lumamark-sync') return accept(async () => {
+      const config = syncConfig ?? await loadSyncConfig();
+      if (!config?.url) return { ok: false, status: 'error', error: 'WebDAV is not configured' };
+      const result = await new WebDavSyncEngine(repository, webDavClient(config)).sync();
+      if (result.status === 'error' && config.autoSync) {
+        syncConfig = { ...config, autoSync: false };
+        await repository.setSyncConfig(syncConfig);
+        const metadata = await repository.getSyncMetadata();
+        await repository.setSyncMetadata({ ...metadata, autoSync: false });
+      }
+      return result;
+    });
+    if (type === 'lumamark-export') return accept(async () => {
+      const [bookmarks, collections] = await Promise.all([repository.list({ includeDeleted: true }), repository.listCollections()]);
+      return { ok: true, content: exportLumaMarkJson(bookmarks, collections) };
+    });
+    if (type === 'lumamark-import') return accept(async () => {
+      const parsed = payload.format === 'html' ? parseBookmarksHtml(String(payload.content ?? '')) : parseLumaMarkJson(String(payload.content ?? ''));
+      const existing = await repository.list({ includeDeleted: true });
+      const action = (['skip', 'update', 'copy'] as const).includes(payload.action) ? payload.action as DuplicateImportAction : 'skip';
+      const plan = planImport(parsed, existing, action);
+      await applyImportPlan(plan, service, repository);
+      for (const collection of parsed.collections as Collection[]) await repository.putCollection(collection);
+      return { ok: true, issues: plan.issues, imported: plan.entries.length, duplicateAction: action, choices: plan.issues.filter((issue) => issue.kind === 'duplicate').length };
+    });
+    return undefined;
   });
 }
 
 if (typeof globalThis !== 'undefined') {
   try { startBackground(); } catch { /* popup/tests can inject a fake API */ }
 }
-

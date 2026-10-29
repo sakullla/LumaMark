@@ -1,4 +1,4 @@
-import { BookmarkService, CreateBookmarkInput, SaveBookmarkResult } from '../../domain/src/index';
+import { BookmarkService, CreateBookmarkInput, normalizeUrl, SaveBookmarkResult } from '../../domain/src/index';
 
 export interface ActiveTab {
   id?: number;
@@ -22,9 +22,17 @@ export interface ExtensionNotifications {
   onButtonClicked?: { addListener(listener: (id: string, buttonIndex: number) => void): void };
 }
 
+export interface SaveMenuInfo {
+  menuItemId: string;
+  linkUrl?: string;
+  linkText?: string;
+  selectionText?: string;
+  pageUrl?: string;
+}
+
 export interface ExtensionContextMenus {
   create(properties: { id: string; title: string; contexts: string[] }): void | Promise<void>;
-  onClicked?: { addListener(listener: (info: { menuItemId: string }, tab?: ActiveTab) => void): void };
+  onClicked?: { addListener(listener: (info: SaveMenuInfo, tab?: ActiveTab) => void): void };
 }
 
 export interface ExtensionCommands {
@@ -36,12 +44,25 @@ export interface ExtensionRuntime {
   onMessage?: { addListener(listener: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void): void };
 }
 
+export interface ExtensionStorage {
+  local: {
+    get(keys?: string | string[] | Record<string, unknown> | null): Promise<Record<string, unknown>>;
+    set(items: Record<string, unknown>): Promise<void>;
+  };
+}
+
+export interface ExtensionI18n {
+  getUILanguage?: () => string;
+}
+
 export interface WebExtensionApi {
   tabs: ExtensionTabs;
   notifications?: ExtensionNotifications;
   contextMenus?: ExtensionContextMenus;
   commands?: ExtensionCommands;
   runtime?: ExtensionRuntime;
+  storage?: ExtensionStorage;
+  i18n?: ExtensionI18n;
 }
 
 export interface SaveActionHandlers {
@@ -72,6 +93,16 @@ export async function captureActivePage(api: WebExtensionApi): Promise<CapturedP
   return { url: tab.url, title: tab.title, faviconUrl: tab.favIconUrl };
 }
 
+export function isSavablePageUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    normalizeUrl(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function saveActivePage(
   api: WebExtensionApi,
   service: BookmarkService,
@@ -84,12 +115,13 @@ export async function saveActivePage(
 
 export function registerSaveEntrypoints(
   api: WebExtensionApi,
-  handler: () => Promise<void>,
+  handler: (info?: SaveMenuInfo) => Promise<void>,
+  title = 'Save to LumaMark',
 ): void {
   if (api.contextMenus) {
-    void api.contextMenus.create({ id: 'lumamark-save-page', title: 'Save page to LumaMark', contexts: ['page', 'link'] });
+    void api.contextMenus.create({ id: 'lumamark-save-page', title, contexts: ['page', 'link'] });
     api.contextMenus.onClicked?.addListener((info) => {
-      if (info.menuItemId === 'lumamark-save-page') void handler();
+      if (info.menuItemId === 'lumamark-save-page') void handler(info);
     });
   }
   api.commands?.onCommand?.addListener((command) => {
@@ -111,27 +143,55 @@ export function saveActionsForResult(result: SaveBookmarkResult): SaveAction[] {
   ];
 }
 
-export async function notifySaveResult(api: WebExtensionApi, result: SaveBookmarkResult, handlers: SaveActionHandlers = {}): Promise<void> {
+export interface SaveNoticeCopy {
+  savedTitle?: string;
+  savedMessage?: string;
+  existingTitle?: string;
+  existingMessage?: string;
+  actionTitles?: Partial<Record<SaveAction['id'], string>>;
+}
+
+let noticeSequence = 0;
+
+export async function notifyMessage(
+  api: WebExtensionApi,
+  title: string,
+  message: string,
+  buttons: Array<{ title: string; onClick?: () => void }> = [],
+): Promise<void> {
   if (!api.notifications?.create) return;
-  const notificationId = `lumamark-${Date.now()}`;
-  const actions = saveActionsForResult(result);
-  const message = result.kind === 'existing' ? 'Already saved. Choose an action.' : 'Saved. Open the library or undo this save.';
+  const notificationId = `lumamark-${Date.now()}-${noticeSequence++}`;
   await api.notifications.create(notificationId, {
     type: 'basic',
-    title: result.kind === 'existing' ? 'Already saved' : 'Bookmark saved',
+    title,
     message,
-    buttons: actions.map((action) => ({ title: action.title })),
+    buttons: buttons.map((button) => ({ title: button.title })),
   });
+  if (!buttons.length) return;
   api.notifications.onButtonClicked?.addListener((id, index) => {
     if (id !== notificationId) return;
-    const action = actions[index];
-    if (!action) return;
-    const handlerKey = action.id === 'open-library' ? 'openLibrary'
-      : action.id === 'open-existing' ? 'openExisting'
-        : action.id === 'update-existing' ? 'updateExisting'
-          : action.id === 'copy-existing' ? 'copyExisting' : 'undo';
-    const handler = handlers[handlerKey];
-    if (handler) void handler();
+    buttons[index]?.onClick?.();
   });
+}
+
+export async function notifySaveResult(api: WebExtensionApi, result: SaveBookmarkResult, handlers: SaveActionHandlers = {}, copy: SaveNoticeCopy = {}): Promise<void> {
+  const actions = saveActionsForResult(result).map((action) => ({ ...action, title: copy.actionTitles?.[action.id] ?? action.title }));
+  const saved = result.kind === 'saved';
+  await notifyMessage(
+    api,
+    saved ? (copy.savedTitle ?? 'Bookmark saved') : (copy.existingTitle ?? 'Already saved'),
+    saved ? (copy.savedMessage ?? 'Saved. Open the library or undo this save.') : (copy.existingMessage ?? 'Already saved. Choose an action.'),
+    actions.map((action) => ({
+      title: action.title,
+      onClick: () => {
+        const handlerKey = action.id === 'open-library' ? 'openLibrary'
+          : action.id === 'open-existing' ? 'openExisting'
+            : action.id === 'update-existing' ? 'updateExisting'
+              : action.id === 'copy-existing' ? 'copyExisting' : 'undo';
+        const handler = handlers[handlerKey];
+        if (handler) void handler();
+      },
+    })),
+  );
 }
 

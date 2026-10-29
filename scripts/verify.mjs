@@ -25,7 +25,7 @@ if (packageJson.scripts?.lint) await run(npm, ['run', 'lint']);
 await run(npm, ['test']);
 await run(process.execPath, [resolve(root, 'scripts/build-extension.mjs')]);
 
-const required = ['manifest.json', 'background.js', 'content.js', 'popup.html', 'popup.js', 'library.html', 'library.js', 'settings.html', 'settings.js'];
+const required = ['manifest.json', 'background.js', 'content.js', 'popup.html', 'popup.js', 'library.html', 'library.js', 'settings.html', 'settings.js', 'home.html', 'home.js'];
 for (const target of ['chrome', 'firefox', 'safari']) {
   for (const file of required) {
     const path = resolve(root, 'dist/extension', target, file);

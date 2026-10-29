@@ -21,7 +21,7 @@ describe('LumaMark UI state and documents', () => {
   });
 
   it('provides accessible popup, library and settings landmarks', () => {
-    const collection: Collection = { id: 'c', name: 'Work', position: 0, createdAt: '2024-01-01', updatedAt: '2024-01-01', revision: 1 };
+    const collection: Collection = { id: 'c', name: 'Work', position: 0, toolbar: false, createdAt: '2024-01-01', updatedAt: '2024-01-01', revision: 1 };
     expect(popupDocument()).toContain('aria-live');
     expect(libraryDocument([collection])).toContain('Search title, URL, tags, or notes');
     expect(settingsDocument()).toContain('WebDAV URL');
