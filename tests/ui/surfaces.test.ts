@@ -62,6 +62,10 @@ describe('bookmark bar and shared surfaces', () => {
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain(`>${titleInitial(inside.title)}<`);
     expect(markup).toContain('item-fallback');
+    expect(markup).toContain('class="bar-item folder"');
+    expect(markup).toContain('item-glyph');
+    expect(markup).toContain('<svg');
+    expect(markup).toContain('aria-hidden="true"');
     const icon = renderBarEntries([{ kind: 'bookmark', id: 'icon', title: 'Icon', url: 'https://icon.example/a', faviconUrl: 'https://icon.example/favicon.ico', children: [] }]);
     expect(icon).toContain(`data-initial="${titleInitial('Icon')}"`);
     const open = buildBar([loose], [folder('plain', { name: 'Plain' })]);
@@ -81,7 +85,10 @@ describe('bookmark bar and shared surfaces', () => {
     expect(homeSyncPhrase({ configured: true, status: 'conflict' })).toBe('needs-attention');
     expect(homeSyncPhrase({ configured: true, status: 'idle' })).toBe('aligned');
     expect(renderSyncLine('needs-attention')).toContain('href="settings.html"');
-    expect(renderSyncLine('local-only')).toBe('Only on this browser');
+    expect(renderSyncLine('needs-attention')).toContain('class="sync-dot danger"');
+    expect(renderSyncLine('local-only')).toContain('Only on this browser');
+    expect(renderSyncLine('local-only')).toContain('class="sync-dot"');
+    expect(renderSyncLine('local-only')).not.toContain('sync-dot danger');
   });
 
   it('keeps overflow and drag decisions independent of the page width measurement', () => {
@@ -137,7 +144,10 @@ describe('bookmark bar and shared surfaces', () => {
       expect(html).not.toMatch(/全文|团队协作|社交分享|移动 Safari|注册|登录|配对|full-text archive|team collaboration|social sharing|Mobile Safari|pairing code|sign in/i);
     }
     expect(renderEmptyState({ ...defaultLibraryFilters(), text: 'missing' })).toContain('clear-filters');
+    expect(renderEmptyState({ ...defaultLibraryFilters(), text: 'missing' })).toContain('class="empty-icon"');
     expect(renderEmptyState(defaultLibraryFilters())).toContain('Save current page');
+    expect(renderEmptyState(defaultLibraryFilters())).toContain('class="primary"');
+    expect(renderEmptyState(defaultLibraryFilters())).toContain('<svg');
     expect(libraryFailureMessage()).not.toContain('No bookmarks yet');
     expect(libraryFailureMessage('zh')).not.toContain('还没有书签');
     const conflicts = renderConflicts([{ id: 'c', local: { title: 'Local', url: 'https://local.example', notes: 'mine' }, remote: { title: 'Remote', url: 'https://remote.example', notes: 'theirs' } }]);

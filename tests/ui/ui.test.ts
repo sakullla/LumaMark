@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeBookmark, type Collection } from '../../packages/domain/src/index';
-import { defaultLibraryFilters, filterBookmarks, libraryDocument, popupDocument, renderEmptyState, settingsDocument, toBookmarkQuery } from '../../apps/extension/src/ui/index';
+import { defaultLibraryFilters, filterBookmarks, libraryDocument, popupDocument, renderBookmarkCard, renderEmptyState, settingsDocument, toBookmarkQuery } from '../../apps/extension/src/ui/index';
 import { popupRuntimeMessage, popupStatus } from '../../apps/extension/src/pages/popup';
 import { settingsStatusMessage } from '../../apps/extension/src/pages/settings';
 
@@ -18,6 +18,23 @@ describe('LumaMark UI state and documents', () => {
     const html = renderEmptyState({ ...defaultLibraryFilters(), text: 'missing' });
     expect(html).toContain('No matching bookmarks');
     expect(html).toContain('clear-filters');
+  });
+
+  it('renders bookmark card actions as labelled SVG icon buttons', () => {
+    const html = renderBookmarkCard(first);
+    expect(html).toContain('class="bookmark-card"');
+    expect(html).toContain('class="bookmark-actions"');
+    expect(html).toContain('data-action="favorite"');
+    expect(html).toContain('aria-label="Remove from favorites"');
+    expect(html).toContain('data-action="edit"');
+    expect(html).toContain('aria-label="Edit"');
+    expect(html).toContain('data-action="delete"');
+    expect(html).toContain('aria-label="Delete"');
+    expect(html).toContain('<svg');
+    expect(html).toContain('aria-hidden="true"');
+    expect(html).not.toContain('★');
+    expect(html).not.toContain('☆');
+    expect(renderBookmarkCard(second)).toContain('aria-label="Add to favorites"');
   });
 
   it('provides accessible popup, library and settings landmarks', () => {

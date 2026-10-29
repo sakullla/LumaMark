@@ -7,6 +7,7 @@ import {
   sortByPosition,
 } from '../../../../packages/domain/src/index';
 import { escapeHtml } from './html';
+import { folderIcon } from './icons';
 
 export const DEFAULT_SEARCH_URL = 'https://www.google.com/search?q={query}';
 
@@ -209,7 +210,10 @@ function iconMarkup(title: string, faviconUrl?: string): string {
 
 function entryMarkup(entry: BarEntry, parentId: string): string {
   const tooltip = `<span class="item-tooltip" role="tooltip">${escapeHtml(entry.title)}</span>`;
-  const body = `${iconMarkup(entry.title, entry.faviconUrl)}<span class="item-label">${escapeHtml(entry.title)}</span>`;
+  const glyph = `<span class="item-glyph" aria-hidden="true">${folderIcon()}</span>`;
+  const body = entry.kind === 'folder'
+    ? `${glyph}<span class="item-label">${escapeHtml(entry.title)}</span>`
+    : `${iconMarkup(entry.title, entry.faviconUrl)}<span class="item-label">${escapeHtml(entry.title)}</span>`;
   if (entry.kind === 'folder') {
     const children = entry.children.map((child) => entryMarkup(child, entry.id)).join('');
     return `<div class="bar-item folder" data-kind="folder" data-id="${escapeHtml(entry.id)}" data-parent-id="${escapeHtml(parentId)}" draggable="true">` +

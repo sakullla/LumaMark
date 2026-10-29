@@ -2,6 +2,7 @@ import type { Bookmark, BookmarkQuery, Collection } from '../../../../packages/d
 import { folderTree, isHttpUrl, titleInitial, type FolderNode, type HomeSyncPhrase } from './bar';
 import { copyFor, type UiLanguage } from './copy';
 import { escapeHtml } from './html';
+import { folderIcon, pencilIcon, searchIcon, starIcon, trashIcon } from './icons';
 
 export type { UiLanguage } from './copy';
 export { escapeHtml } from './html';
@@ -140,8 +141,9 @@ export function renderBookmarkCard(bookmark: Bookmark, language: UiLanguage = 'e
     `${icon}<a class="bookmark-title" href="${escapeHtml(bookmark.url)}">${escapeHtml(bookmark.title)}</a>` +
     `<p class="bookmark-domain">${escapeHtml(bookmark.domain)}</p>` +
     `<div class="bookmark-actions" role="group" aria-label="${escapeHtml(text.actions)}">` +
-    `<button type="button" data-action="favorite" aria-label="${escapeHtml(favoriteLabel)}">${bookmark.favorite ? '★' : '☆'}</button>` +
-    `<button type="button" data-action="edit">${escapeHtml(text.edit)}</button><button type="button" data-action="delete">${escapeHtml(text.delete)}</button>` +
+    `<button type="button" class="icon-button" data-action="favorite" aria-label="${escapeHtml(favoriteLabel)}">${starIcon(bookmark.favorite)}</button>` +
+    `<button type="button" class="icon-button" data-action="edit" aria-label="${escapeHtml(text.edit)}">${pencilIcon()}</button>` +
+    `<button type="button" class="icon-button danger" data-action="delete" aria-label="${escapeHtml(text.delete)}">${trashIcon()}</button>` +
     `</div></article>`;
 }
 
@@ -154,13 +156,15 @@ export function renderEmptyState(filters: LibraryFilters, language: UiLanguage =
   const text = copyFor(language);
   const constrained = Boolean(filters.text || filters.collectionId || filters.tag || filters.domain || filters.from || filters.to || filters.favoriteOnly || filters.includeDeleted);
   if (constrained) {
-    return `<section class="empty-state" role="status"><h2>${escapeHtml(text.noMatches)}</h2><p>${escapeHtml(text.noMatchesHelp)}</p>` +
-      `<button type="button" data-action="clear-filters">${escapeHtml(text.clearFilters)}</button></section>`;
+    return `<section class="empty-state" role="status"><span class="empty-icon" aria-hidden="true">${searchIcon()}</span>` +
+      `<h2>${escapeHtml(text.noMatches)}</h2><p>${escapeHtml(text.noMatchesHelp)}</p>` +
+      `<div class="empty-actions"><button type="button" class="secondary" data-action="clear-filters">${escapeHtml(text.clearFilters)}</button></div></section>`;
   }
-  return `<section class="empty-state" role="status"><h2>${escapeHtml(text.noBookmarks)}</h2><p>${escapeHtml(text.emptyLibraryHelp)}</p>` +
+  return `<section class="empty-state" role="status"><span class="empty-icon" aria-hidden="true">${folderIcon()}</span>` +
+    `<h2>${escapeHtml(text.noBookmarks)}</h2><p>${escapeHtml(text.emptyLibraryHelp)}</p>` +
     `<label for="empty-import-action">${escapeHtml(text.duplicateRule)}</label><select id="empty-import-action">${duplicateOptions(language)}</select>` +
-    `<button type="button" data-action="save-page">${escapeHtml(text.saveCurrent)}</button>` +
-    `<button type="button" data-action="import-html">${escapeHtml(text.importHtml)}</button></section>`;
+    `<div class="empty-actions"><button type="button" class="primary" data-action="save-page">${escapeHtml(text.saveCurrent)}</button>` +
+    `<button type="button" class="secondary" data-action="import-html">${escapeHtml(text.importHtml)}</button></div></section>`;
 }
 
 export function libraryFailureMessage(language: UiLanguage = 'en'): string {
@@ -180,8 +184,10 @@ export function renderConflicts(items: Array<{ id: string; local?: Pick<Bookmark
 export function renderSyncLine(phrase: HomeSyncPhrase, language: UiLanguage = 'en'): string {
   const text = copyFor(language);
   const label = phrase === 'local-only' ? text.syncLocal : phrase === 'aligned' ? text.syncAligned : phrase === 'waiting-network' ? text.syncWaiting : text.syncNeeds;
-  if (phrase !== 'needs-attention') return escapeHtml(label);
-  return `${escapeHtml(label)} <a href="settings.html">${escapeHtml(text.openSettings)}</a>`;
+  const dot = phrase === 'needs-attention' ? 'sync-dot danger' : 'sync-dot';
+  const status = `<span class="${dot}" aria-hidden="true"></span><span class="sync-text">${escapeHtml(label)}</span>`;
+  if (phrase !== 'needs-attention') return status;
+  return `${status} <a href="settings.html">${escapeHtml(text.openSettings)}</a>`;
 }
 
 export type RuntimeAction = 'save' | 'undo' | 'open-library' | 'open-home' | 'open-existing' | 'capture' | 'list' | 'list-collections' | 'update-existing' | 'copy-existing' | 'update' | 'delete' | 'restore' | 'favorite' | 'sync' | 'sync-configure' | 'export' | 'import' | 'list-conflicts' | 'resolve-conflict' | 'collection-create' | 'collection-delete' | 'collection-restore' | 'sync-status' | 'reorder' | 'set-toolbar' | 'get-search-engine' | 'set-search-engine' | 'get-sync-config' | 'set-auto-sync';
