@@ -1,4 +1,4 @@
-import type { Bookmark, BookmarkQuery, Collection } from '../../../../packages/domain/src/index';
+import { isSeparator, type Bookmark, type BookmarkQuery, type Collection } from '../../../../packages/domain/src/index';
 import { folderTree, isHttpUrl, titleInitial, type FolderNode, type HomeSyncPhrase } from './bar';
 import { copyFor, fill, type UiLanguage } from './copy';
 import { escapeHtml } from './html';
@@ -49,6 +49,7 @@ export function filterBookmarks(bookmarks: Bookmark[], filters: LibraryFilters):
   const needle = query.text?.toLowerCase();
   return bookmarks
     .filter((bookmark) => {
+      if (isSeparator(bookmark)) return false;
       if (bookmark.deletedAt && !filters.includeDeleted) return false;
       if (query.collectionId && bookmark.collectionId !== query.collectionId) return false;
       if (query.tag && !bookmark.tags.includes(query.tag)) return false;
@@ -88,7 +89,7 @@ export function libraryHasActiveFilters(filters: LibraryFilters): boolean {
 export function renderLibraryResults(bookmarks: Bookmark[], folderId: string | null, filters: LibraryFilters, language: UiLanguage = 'en'): string {
   const visible = bookmarksInFolder(bookmarks, folderId, filters);
   if (visible.length) return visible.map((bookmark) => renderBookmarkCard(bookmark, language)).join('');
-  const alive = bookmarks.some((bookmark) => !bookmark.deletedAt);
+  const alive = bookmarks.some((bookmark) => !bookmark.deletedAt && !isSeparator(bookmark));
   if (!alive && !libraryHasActiveFilters(filters)) return renderEmptyState(defaultLibraryFilters(), language);
   if (libraryHasActiveFilters(filters)) return renderEmptyState(filters, language);
   return `<section class="empty-state" role="status"><p>${escapeHtml(copyFor(language).emptyFolder)}</p></section>`;
@@ -124,7 +125,7 @@ export type FolderCounts = Record<string, number>;
 export function folderCounts(bookmarks: Bookmark[]): FolderCounts {
   const counts: FolderCounts = {};
   for (const bookmark of bookmarks) {
-    if (bookmark.deletedAt) continue;
+    if (bookmark.deletedAt || isSeparator(bookmark)) continue;
     const key = bookmark.collectionId ?? '';
     counts[key] = (counts[key] ?? 0) + 1;
   }
@@ -164,12 +165,16 @@ export function renderBookmarkCard(bookmark: Bookmark, language: UiLanguage = 'e
     ? `<span class="item-icon"><img src="${escapeHtml(bookmark.faviconUrl)}" alt="" data-initial="${initial}"><span class="item-fallback" style="--tile-hue:${hue}" hidden>${initial}</span></span>`
     : `<span class="item-fallback" style="--tile-hue:${hue}" aria-hidden="true">${initial}</span>`;
   const favoriteLabel = bookmark.favorite ? text.unfavorite : text.favorite;
+  // Bookmarklets and browser pages cannot be opened from an extension page; show them without a live link.
+  const titleLink = isHttpUrl(bookmark.url)
+    ? `<a class="bookmark-title" href="${escapeHtml(bookmark.url)}" title="${escapeHtml(bookmark.url)}">${escapeHtml(bookmark.title)}</a>`
+    : `<span class="bookmark-title" title="${escapeHtml(bookmark.url)}">${escapeHtml(bookmark.title)}</span>`;
   const tags = bookmark.tags.length ? `<p class="bookmark-tags">${bookmark.tags.map((tag) => `<span class="tag">#${escapeHtml(tag)}</span>`).join('')}</p>` : '';
   const notes = bookmark.notes ? `<p class="bookmark-notes">${escapeHtml(bookmark.notes)}</p>` : '';
   return `<article class="bookmark-card" data-bookmark-id="${escapeHtml(bookmark.id)}" data-favorite="${bookmark.favorite ? 'true' : 'false'}" tabindex="0">` +
     `<label class="bookmark-select"><input type="checkbox" data-select-bookmark="${escapeHtml(bookmark.id)}" aria-label="${escapeHtml(text.select)} ${escapeHtml(bookmark.title)}"></label>` +
-    `${icon}<div class="bookmark-body"><a class="bookmark-title" href="${escapeHtml(bookmark.url)}" title="${escapeHtml(bookmark.url)}">${escapeHtml(bookmark.title)}</a>` +
-    `<p class="bookmark-domain">${escapeHtml(bookmark.domain)}</p>${tags}${notes}</div>` +
+    `${icon}<div class="bookmark-body">${titleLink}` +
+    `<p class="bookmark-domain">${escapeHtml(bookmark.domain || bookmark.url)}</p>${tags}${notes}</div>` +
     `<div class="bookmark-actions" role="group" aria-label="${escapeHtml(text.actions)}">` +
     `<button type="button" class="icon-button${bookmark.favorite ? ' is-on' : ''}" data-action="favorite" aria-label="${escapeHtml(favoriteLabel)}" title="${escapeHtml(favoriteLabel)}">${starIcon(bookmark.favorite)}</button>` +
     `<button type="button" class="icon-button" data-action="edit" aria-label="${escapeHtml(text.edit)}" title="${escapeHtml(text.edit)}">${pencilIcon()}</button>` +

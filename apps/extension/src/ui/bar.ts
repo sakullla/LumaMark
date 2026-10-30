@@ -3,6 +3,7 @@ import {
   Collection,
   comparePositionThenId,
   migrateCollection,
+  isSeparator,
   orderedSiblings,
   sortByPosition,
 } from '../../../../packages/domain/src/index';
@@ -32,7 +33,8 @@ export function toolbarFolder(collections: readonly Collection[]): Collection | 
 
 export function buildBar(bookmarks: readonly Bookmark[], collections: readonly Collection[]): BarModel {
   const toolbar = toolbarFolder(collections);
-  const entries = (parentId: string | undefined): BarEntry[] => orderedSiblings(parentId, bookmarks, collections).map((item) => {
+  const shown = bookmarks.filter((bookmark) => !isSeparator(bookmark));
+  const entries = (parentId: string | undefined): BarEntry[] => orderedSiblings(parentId, shown, collections).map((item) => {
     if (item.kind === 'folder') {
       return { kind: 'folder', id: item.record.id, title: item.record.name, children: entries(item.record.id) };
     }
@@ -220,7 +222,8 @@ function entryMarkup(entry: BarEntry, parentId: string): string {
       `<button type="button" class="bar-hit" aria-expanded="false" title="${escapeHtml(entry.title)}">${body}</button>${tooltip}` +
       `<div class="folder-menu" hidden role="menu" data-parent-id="${escapeHtml(entry.id)}">${children}</div></div>`;
   }
-  return `<a class="bar-item" href="${escapeHtml(entry.url ?? '')}" data-kind="bookmark" data-id="${escapeHtml(entry.id)}" data-parent-id="${escapeHtml(parentId)}" draggable="true" title="${escapeHtml(entry.title)}">${body}${tooltip}</a>`;
+  const href = entry.url && isHttpUrl(entry.url) ? ` href="${escapeHtml(entry.url)}"` : '';
+  return `<a class="bar-item"${href} data-kind="bookmark" data-id="${escapeHtml(entry.id)}" data-parent-id="${escapeHtml(parentId)}" draggable="true" title="${escapeHtml(entry.title)}">${body}${tooltip}</a>`;
 }
 
 export function renderBarEntries(entries: readonly BarEntry[], parentId = ''): string {

@@ -5,6 +5,7 @@ import {
   BookmarkService,
   Collection,
   domainFromUrl,
+  normalizeBookmarkUrl,
   normalizeUrl,
   type Bookmark,
   type BookmarkRepository,
@@ -27,7 +28,7 @@ import {
   type WebExtensionApi,
 } from '../../../../packages/browser/src/index';
 import { copyFor, languageFromApi, notificationCopy } from '../ui/copy';
-import { DEFAULT_SEARCH_URL, nextSiblingPosition, normalizeSearchUrl, toolbarFolder } from '../ui/bar';
+import { DEFAULT_SEARCH_URL, isHttpUrl, nextSiblingPosition, normalizeSearchUrl, toolbarFolder } from '../ui/bar';
 import { placeItem } from './place';
 import { normalizeBridgeState, reconcileNativeBookmarks, type BridgeState, type NativeBookmarksApi, type ReconcileReport } from './native';
 import { probeWebDav } from './probe';
@@ -537,11 +538,13 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       const ids = (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map(String);
       const update = payload.update ?? {};
       try {
-        const url = update.url !== undefined ? normalizeUrl(String(update.url)) : undefined;
         const items: Bookmark[] = [];
         for (const id of ids) {
           const current = await repository.findById(id);
           if (!current) throw new Error('Bookmark not found');
+          // http(s) bookmarks stay http(s); bookmarks from the browser (bookmarklets, file: links) keep their kind.
+          const url = update.url === undefined ? undefined
+            : isHttpUrl(current.url) ? normalizeUrl(String(update.url)) : normalizeBookmarkUrl(String(update.url));
           const next = applyBookmarkUpdate(current, {
             title: update.title,
             notes: update.notes,
@@ -654,6 +657,7 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
         supported: Boolean(nativeApi),
         enabled: await nativeEnabled(),
         linked: state?.links.filter((link) => link.kind !== 'root').length ?? 0,
+        unplaceable: Object.keys(state?.unplaceable ?? {}).length,
         lastReconcileAt: lastNative.at ?? state?.lastReconcileAt,
         error: lastNative.error,
       };

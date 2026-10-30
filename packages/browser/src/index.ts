@@ -100,7 +100,7 @@ interface NativeEvent { addListener(listener: (...args: any[]) => void): void }
 /** The parts of chrome.bookmarks / browser.bookmarks that LumaMark uses. */
 export interface NativeBookmarksApi {
   getTree(): Promise<NativeNode[]>;
-  create(input: { parentId: string; index?: number; title?: string; url?: string }): Promise<NativeNode>;
+  create(input: { parentId: string; index?: number; title?: string; url?: string; type?: 'bookmark' | 'folder' | 'separator' }): Promise<NativeNode>;
   update(id: string, changes: { title?: string; url?: string }): Promise<NativeNode>;
   move(id: string, destination: { parentId?: string; index?: number }): Promise<NativeNode>;
   remove(id: string): Promise<void>;

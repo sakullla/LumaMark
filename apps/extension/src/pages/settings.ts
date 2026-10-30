@@ -60,7 +60,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
 
   const nativeToggle = root.querySelector<HTMLInputElement>('#native-sync');
   const nativeStatus = root.querySelector<HTMLElement>('#native-status');
-  const showNative = (response: { supported?: boolean; enabled?: boolean; linked?: number; error?: string } | undefined) => {
+  const showNative = (response: { supported?: boolean; enabled?: boolean; linked?: number; unplaceable?: number; error?: string } | undefined) => {
     if (!nativeToggle || !nativeStatus) return;
     if (!response?.supported) {
       nativeToggle.checked = false;
@@ -72,7 +72,8 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
     nativeToggle.checked = Boolean(response.enabled);
     if (!response.enabled) nativeStatus.textContent = text.nativeOff;
     else if (response.error) nativeStatus.textContent = fill(text.nativeError, { v: response.error });
-    else nativeStatus.textContent = `${text.nativeOn} ${fill(text.nativeLinked, { n: response.linked ?? 0 })}`;
+    else nativeStatus.textContent = `${text.nativeOn} ${fill(text.nativeLinked, { n: response.linked ?? 0 })}`
+      + (response.unplaceable ? ` ${fill(text.nativeUnplaceable, { n: response.unplaceable })}` : '');
   };
   const loadNative = async () => {
     try { showNative(await sendRuntime(port, 'native-status')); } catch { showNative(undefined); }

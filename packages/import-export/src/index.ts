@@ -7,7 +7,10 @@ import {
   migrateBookmark,
   migrateCollection,
   migrateExport,
+  isSeparator,
+  normalizeBookmarkUrl,
   normalizeUrl,
+  urlKey,
 } from '../../domain/src/index';
 
 export type DuplicateImportAction = 'skip' | 'update' | 'copy';
@@ -96,7 +99,7 @@ export function parseLumaMarkJson(text: string): ImportResult {
         if (typeof item.revision !== 'number' || !Number.isInteger(item.revision) || item.revision < 1) {
           throw new Error('Bookmark revision must be a positive integer');
         }
-        const url = normalizeUrl(item.url);
+        const url = normalizeBookmarkUrl(item.url);
         valid.push({
           ...makeBookmark({
             id: item.id,
@@ -234,11 +237,11 @@ export function exportLumaMarkJson(bookmarks: Bookmark[], collections: Collectio
 
 /** Build an explicit import plan so the UI can ask how to handle duplicate URLs. */
 export function planImport(result: ImportResult, existing: Bookmark[], action: DuplicateImportAction = 'skip'): ImportPlan {
-  const byUrl = new Map(existing.map((bookmark) => [normalizeUrl(bookmark.url), bookmark]));
+  const byUrl = new Map(existing.filter((bookmark) => !isSeparator(bookmark)).map((bookmark) => [urlKey(bookmark.url), bookmark]));
   const issues = [...result.issues];
   const entries: ImportPlanEntry[] = [];
   for (const bookmark of result.bookmarks) {
-    const found = byUrl.get(normalizeUrl(bookmark.url));
+    const found = isSeparator(bookmark) ? undefined : byUrl.get(urlKey(bookmark.url));
     if (!found) {
       entries.push({ bookmark, action: 'create' });
       continue;

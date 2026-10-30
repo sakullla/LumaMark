@@ -186,6 +186,7 @@ const en = {
   nativeOn: 'On — changes here and in your other browsers stay in step.',
   bookmarksBarShort: 'Bookmarks bar',
   homeExplain: 'The LumaMark home page (open it from the toolbar card) shows this folder as its bar.',
+  nativeUnplaceable: '{n} bookmarks from other browsers cannot be added here (for example another browser\u2019s internal pages); they stay synced.',
 };
 
 const zh: { [K in keyof typeof en]: string } = {
@@ -374,6 +375,7 @@ const zh: { [K in keyof typeof en]: string } = {
   nativeOn: '已开启：这里和其他浏览器的书签改动会保持一致。',
   bookmarksBarShort: '书签栏',
   homeExplain: 'LumaMark 首页（从工具栏卡片打开）把这个文件夹显示为书签栏。',
+  nativeUnplaceable: '有 {n} 个来自其他浏览器的书签这里放不进去（例如其他浏览器的内部页面），它们仍会继续同步。',
 };
 
 export type Copy = { [K in keyof typeof en]: string };

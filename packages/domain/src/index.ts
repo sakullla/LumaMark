@@ -139,6 +139,36 @@ export function normalizeUrl(value: string): string {
   return parsed.toString();
 }
 
+/** Stored URL of a bookmark separator (Firefox only; other browsers have none). */
+export const SEPARATOR_URL = 'lumamark:separator';
+
+export function isSeparator(bookmark: Pick<Bookmark, 'url'>): boolean {
+  return bookmark.url === SEPARATOR_URL;
+}
+
+/**
+ * URL accepted in a stored bookmark. Pages saved by the user stay http(s) (see normalizeUrl), but bookmarks that
+ * come from the browser may be bookmarklets, file: links or browser pages, and separators use SEPARATOR_URL.
+ * Firefox place: queries are dynamic lists rather than bookmarks and are not stored.
+ */
+export function normalizeBookmarkUrl(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === SEPARATOR_URL) return trimmed;
+  try {
+    return normalizeUrl(trimmed);
+  } catch (error) {
+    let parsed: URL;
+    try { parsed = new URL(trimmed); } catch { throw error; }
+    if (parsed.protocol === 'place:') throw new Error('Firefox place: queries are not stored');
+    return trimmed;
+  }
+}
+
+/** Duplicate key for a stored URL; never throws. */
+export function urlKey(value: string): string {
+  try { return normalizeUrl(value); } catch { return value.trim(); }
+}
+
 export function domainFromUrl(value: string): string {
   try {
     return new URL(value).hostname.toLowerCase();
@@ -161,7 +191,7 @@ export function validateBookmark(value: unknown): asserts value is Bookmark {
   if (typeof item.id !== 'string' || typeof item.url !== 'string' || typeof item.title !== 'string') {
     throw new Error('Invalid bookmark fields');
   }
-  normalizeUrl(item.url);
+  normalizeBookmarkUrl(item.url);
   if (!Array.isArray(item.tags) || item.tags.some((tag) => typeof tag !== 'string')) {
     throw new Error('Invalid bookmark tags');
   }
@@ -214,7 +244,7 @@ export function migrateCollection<T extends Partial<Collection>>(value: T): T & 
 }
 
 export function makeBookmark(input: CreateBookmarkInput, now = new Date().toISOString()): Bookmark {
-  const url = normalizeUrl(input.url);
+  const url = normalizeBookmarkUrl(input.url);
   return {
     id: input.id ?? crypto.randomUUID(),
     url,

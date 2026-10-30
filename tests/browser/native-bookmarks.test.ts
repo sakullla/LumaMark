@@ -6,6 +6,7 @@ import { makeBookmark, type Bookmark, type Collection } from '../../packages/dom
 import {
   reconcileNativeBookmarks,
   ROOT_MENU_ID,
+  ROOT_MOBILE_ID,
   ROOT_TOOLBAR_ID,
   type BridgeState,
   type BridgeStateStore,
@@ -13,7 +14,7 @@ import {
   type NativeNode,
 } from '../../apps/extension/src/background/native';
 
-interface FakeNode { id: string; parentId?: string; title: string; url?: string; type?: string; children: string[] }
+interface FakeNode { id: string; parentId?: string; title: string; url?: string; type?: string; unmodifiable?: string; children: string[] }
 
 /** In-memory bookmarks API with Chrome or Firefox root ids. */
 export class FakeNative implements NativeBookmarksApi {
@@ -58,16 +59,19 @@ export class FakeNative implements NativeBookmarksApi {
     siblings.splice(siblings.indexOf(id), 1);
   }
 
-  add(parentId: string, title: string, url?: string, type?: string): string {
+  add(parentId: string, title: string, url?: string, type?: string, unmodifiable?: string): string {
     const id = String(this.next++);
-    this.attach(parentId, { id, title, url, type, children: [] });
+    this.attach(parentId, { id, title, url, type, unmodifiable, children: [] });
     return id;
   }
+  /** Firefox refuses some addresses that Chrome accepts (and the reverse). */
+  rejects: (url: string) => boolean = () => false;
   /** Titles under a folder; folders render as "Title/[...]" for compact assertions. */
   shape(parentId: string): unknown[] {
     return this.nodes.get(parentId)!.children.map((id) => {
       const node = this.nodes.get(id)!;
-      return node.url || node.type === 'separator' ? node.title : { [node.title]: this.shape(id) };
+      if (node.type === 'separator') return '---';
+      return node.url ? node.title : { [node.title]: this.shape(id) };
     });
   }
   findByTitle(title: string): FakeNode | undefined { return [...this.nodes.values()].find((node) => node.title === title); }
@@ -75,14 +79,16 @@ export class FakeNative implements NativeBookmarksApi {
   async getTree(): Promise<NativeNode[]> {
     const build = (id: string, index: number): NativeNode => {
       const node = this.nodes.get(id)!;
-      return { id, parentId: node.parentId, index, title: node.title, url: node.url, type: node.type, ...(node.url ? {} : { children: node.children.map((child, position) => build(child, position)) }) };
+      return { id, parentId: node.parentId, index, title: node.title, url: node.url, type: node.type, unmodifiable: node.unmodifiable, ...(node.url || node.type === 'separator' ? {} : { children: node.children.map((child, position) => build(child, position)) }) };
     };
     return [build(this.root, 0)];
   }
-  async create(input: { parentId: string; index?: number; title?: string; url?: string }): Promise<NativeNode> {
+  async create(input: { parentId: string; index?: number; title?: string; url?: string; type?: string }): Promise<NativeNode> {
     this.calls += 1;
+    if (input.url && this.rejects(input.url)) throw new Error(`Invalid url: ${input.url}`);
+    if (input.type === 'separator' && !this.menu) throw new Error('No separators here');
     const id = String(this.next++);
-    this.attach(input.parentId, { id, title: input.title ?? '', url: input.url, children: [] }, input.index);
+    this.attach(input.parentId, { id, title: input.title ?? '', url: input.url, type: input.type === 'separator' ? 'separator' : undefined, children: [] }, input.index);
     this.emit();
     return { id, parentId: input.parentId, title: input.title ?? '', url: input.url };
   }
@@ -146,7 +152,7 @@ function setup(flavor: 'chrome' | 'firefox' = 'chrome') {
 }
 
 describe('native bookmark bridge', () => {
-  it('imports the browser tree, maps the bars and leaves unsyncable items alone', async () => {
+  it('imports the whole browser tree, including bookmarklets and mobile bookmarks, but not managed ones', async () => {
     const { native, repo, run } = setup();
     native.add(native.bar, 'GitHub', 'https://github.com/');
     const dev = native.add(native.bar, 'Dev');
@@ -154,10 +160,11 @@ describe('native bookmark bridge', () => {
     native.add(native.other, 'Hacker News', 'https://news.ycombinator.com/');
     native.add(native.other, 'Bookmarklet', 'javascript:alert(1)');
     native.add(native.mobile, 'Phone only', 'https://phone.example/');
+    native.add(native.root, 'Managed', undefined, undefined, 'managed');
 
     const first = await run();
     expect(first.nativeChanges).toBe(0);
-    expect(first.skipped).toBe(1);
+    expect(first.skipped).toBe(0);
     const toolbar = repo.collections.get(ROOT_TOOLBAR_ID)!;
     expect(toolbar).toMatchObject({ toolbar: true, name: 'Bookmarks bar' });
     const devFolder = repo.liveFolders().find((item) => item.name === 'Dev')!;
@@ -167,8 +174,9 @@ describe('native bookmark bridge', () => {
     expect(devFolder.position).toBe(1);
     expect(byTitle('MDN')?.collectionId).toBe(devFolder.id);
     expect(byTitle('Hacker News')?.collectionId).toBeUndefined();
-    expect(byTitle('Phone only')).toBeUndefined();
-    expect(repo.live().some((item) => item.url.startsWith('javascript:'))).toBe(false);
+    expect(byTitle('Phone only')?.collectionId).toBe(ROOT_MOBILE_ID);
+    expect(repo.collections.get(ROOT_MOBILE_ID)?.name).toBe('Mobile bookmarks');
+    expect(byTitle('Bookmarklet')).toMatchObject({ url: 'javascript:alert(1)', collectionId: undefined });
 
     const second = await run();
     expect(second).toMatchObject({ repoChanges: 0, nativeChanges: 0 });
@@ -278,8 +286,8 @@ describe('native bookmark bridge', () => {
     expect(JSON.stringify(chromeBar).match(/GitHub/g)).toHaveLength(1);
     expect(JSON.stringify(chromeBar).match(/MDN/g)).toHaveLength(1);
     expect(chromeBar).toContain('News');
-    // Firefox's menu arrives in Chrome as a normal folder under Other bookmarks.
-    expect(chrome.native.shape(chrome.native.other)).toEqual([{ 'Bookmarks Menu': ['Mozilla'] }]);
+    // Chrome has no Bookmarks Menu: its bookmarks sit in Other bookmarks, without an extra folder.
+    expect(chrome.native.shape(chrome.native.other)).toEqual(['Mozilla']);
     expect(firefox.native.shape(firefox.native.menu!)).toEqual(['Mozilla']);
     expect(firefox.repo.collections.get(ROOT_MENU_ID)?.deletedAt).toBeUndefined();
     const liveIds = (repo: MemoryRepo) => repo.live().map((item) => item.id).sort();
@@ -399,5 +407,113 @@ describe('native bookmark bridge: ordering', () => {
     const order = repo.live().filter((item) => item.collectionId === ROOT_TOOLBAR_ID).sort((x, y) => x.position - y.position).map((item) => item.title);
     expect(order).toEqual(['One', 'Inserted', 'Two', 'Three']);
     expect(native.shape(native.bar)).toEqual(['One', 'Inserted', 'Two', 'Three']);
+  });
+});
+
+describe('native bookmark bridge: roots, separators and other addresses', () => {
+  const sync = async (...browsers: Array<ReturnType<typeof setup>>) => {
+    for (let round = 0; round < 3; round += 1) {
+      for (const browser of browsers) await browser.run();
+      for (let index = 1; index < browsers.length; index += 1) exchange(browsers[0].repo, browsers[index].repo);
+    }
+    for (const browser of browsers) await browser.run();
+  };
+
+  it('keeps Firefox menu bookmarks in its menu while Chrome shows them in Other bookmarks', async () => {
+    const firefox = setup('firefox');
+    const chrome = setup('chrome');
+    firefox.native.add(firefox.native.menu!, 'Mozilla', 'https://www.mozilla.org/');
+    firefox.native.add(firefox.native.other, 'Unfiled', 'https://unfiled.example/');
+    chrome.native.add(chrome.native.other, 'Chrome other', 'https://chrome-other.example/');
+    await sync(firefox, chrome);
+    // Both started at position 0, so either may come first, but the browsers agree; menu bookmarks come last.
+    const chromeOther = chrome.native.shape(chrome.native.other);
+    expect(chromeOther).toHaveLength(3);
+    expect(chromeOther[2]).toBe('Mozilla');
+    expect(firefox.native.shape(firefox.native.menu!)).toEqual(['Mozilla']);
+    expect(firefox.native.shape(firefox.native.other)).toEqual(chromeOther.slice(0, 2));
+    expect([...chrome.native.nodes.values()].some((node) => node.title === 'Bookmarks Menu')).toBe(false);
+
+    // Renaming it in Chrome keeps it in Firefox's menu; reordering Chrome's Other bookmarks does not move it out.
+    const mozilla = chrome.native.findByTitle('Mozilla')!;
+    await chrome.native.update(mozilla.id, { title: 'Mozilla home' });
+    await chrome.native.move(mozilla.id, { parentId: chrome.native.other, index: 0 });
+    await sync(chrome, firefox);
+    expect(firefox.native.shape(firefox.native.menu!)).toEqual(['Mozilla home']);
+    expect(firefox.native.shape(firefox.native.other)).toEqual(chromeOther.slice(0, 2));
+    expect(await chrome.run()).toMatchObject({ nativeChanges: 0, repoChanges: 0, errors: [] });
+    expect(await firefox.run()).toMatchObject({ nativeChanges: 0, repoChanges: 0, errors: [] });
+  });
+
+  it('maps mobile bookmarks root to root', async () => {
+    const firefox = setup('firefox');
+    const chrome = setup('chrome');
+    firefox.native.add(firefox.native.mobile, 'From phone', 'https://phone.example/');
+    await sync(firefox, chrome);
+    expect(chrome.native.shape(chrome.native.mobile)).toEqual(['From phone']);
+    chrome.native.add(chrome.native.mobile, 'Added on desktop', 'https://desktop.example/');
+    await sync(chrome, firefox);
+    expect(firefox.native.shape(firefox.native.mobile)).toEqual(['From phone', 'Added on desktop']);
+  });
+
+  it('syncs separators between Firefox browsers and leaves Chrome without them', async () => {
+    const a = setup('firefox');
+    const b = setup('firefox');
+    const chrome = setup('chrome');
+    a.native.add(a.native.bar, 'One', 'https://one.example/');
+    a.native.add(a.native.bar, '', undefined, 'separator');
+    a.native.add(a.native.bar, 'Two', 'https://two.example/');
+    a.native.add(a.native.bar, '', undefined, 'separator');
+    await sync(a, b, chrome);
+    expect(b.native.shape(b.native.bar)).toEqual(['One', '---', 'Two', '---']);
+    expect(chrome.native.shape(chrome.native.bar)).toEqual(['One', 'Two']);
+    expect(await chrome.run()).toMatchObject({ nativeChanges: 0, repoChanges: 0, errors: [] });
+
+    const separator = [...b.native.nodes.values()].find((node) => node.type === 'separator')!;
+    await b.native.remove(separator.id);
+    await sync(b, a);
+    expect(a.native.shape(a.native.bar)).toEqual(['One', 'Two', '---']);
+  });
+
+  it('syncs bookmarklets and counts addresses a browser refuses instead of retrying them', async () => {
+    const chrome = setup('chrome');
+    const firefox = setup('firefox');
+    firefox.native.rejects = (url) => url.startsWith('chrome://');
+    chrome.native.add(chrome.native.bar, 'Dark mode', 'javascript:document.body.classList.toggle(\'dark\')');
+    chrome.native.add(chrome.native.bar, 'Extensions', 'chrome://extensions/');
+    await sync(chrome, firefox);
+    expect(firefox.native.shape(firefox.native.bar)).toEqual(['Dark mode']);
+    const report = await firefox.run();
+    expect(report).toMatchObject({ unplaceable: 1, errors: [], nativeChanges: 0 });
+    const calls = firefox.native.calls;
+    await firefox.run();
+    expect(firefox.native.calls).toBe(calls);
+    // Chrome keeps the page it owns.
+    expect(chrome.native.shape(chrome.native.bar)).toEqual(['Dark mode', 'Extensions']);
+  });
+});
+
+describe('native bookmark bridge: upgrade', () => {
+  it('folds the Bookmarks Menu folder an earlier version created in Chrome back into Other bookmarks', async () => {
+    const chrome = setup('chrome');
+    const stamp = new Date().toISOString();
+    await chrome.repo.putCollection({ id: ROOT_MENU_ID, name: 'Bookmarks Menu', position: 1, toolbar: false, createdAt: stamp, updatedAt: stamp, revision: 1 });
+    const item = makeBookmark({ url: 'https://www.mozilla.org/', title: 'Mozilla', collectionId: ROOT_MENU_ID });
+    await chrome.repo.put(item);
+    const folderId = chrome.native.add(chrome.native.other, 'Bookmarks Menu');
+    const nodeId = chrome.native.add(folderId, 'Mozilla', 'https://www.mozilla.org/');
+    chrome.store.state = {
+      version: 1,
+      links: [
+        { lumaId: ROOT_MENU_ID, nativeId: folderId, kind: 'folder', title: 'Bookmarks Menu', parent: chrome.native.other, revision: 1 },
+        { lumaId: item.id, nativeId: nodeId, kind: 'bookmark', title: 'Mozilla', url: 'https://www.mozilla.org/', parent: folderId, revision: 1 },
+      ],
+      orders: {},
+    };
+    await chrome.run();
+    expect(chrome.native.shape(chrome.native.other)).toEqual(['Mozilla']);
+    expect(chrome.repo.collections.get(ROOT_MENU_ID)?.deletedAt).toBeUndefined();
+    expect(chrome.repo.bookmarks.get(item.id)?.collectionId).toBe(ROOT_MENU_ID);
+    expect(await chrome.run()).toMatchObject({ nativeChanges: 0, repoChanges: 0, errors: [] });
   });
 });

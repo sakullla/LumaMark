@@ -78,3 +78,44 @@ describe('redesigned surfaces', () => {
     expect(popupRuntimeMessage('set-native-sync', { enabled: false })).toEqual({ type: 'lumamark-set-native-sync', payload: { enabled: false } });
   });
 });
+
+describe('bookmarks that come from the browser', () => {
+  it('stores bookmarklets and separators but keeps page saves http-only', async () => {
+    const { normalizeBookmarkUrl, normalizeUrl, SEPARATOR_URL } = await import('../../packages/domain/src/index');
+    expect(normalizeBookmarkUrl('javascript:alert(1)')).toBe('javascript:alert(1)');
+    expect(normalizeBookmarkUrl('file:///C:/notes.txt')).toBe('file:///C:/notes.txt');
+    expect(normalizeBookmarkUrl(SEPARATOR_URL)).toBe(SEPARATOR_URL);
+    expect(() => normalizeBookmarkUrl('place:sort=8&maxResults=10')).toThrow();
+    expect(() => normalizeBookmarkUrl('not a url')).toThrow();
+    expect(() => normalizeUrl('javascript:alert(1)')).toThrow(/http/);
+  });
+
+  it('round-trips a bookmarklet through LumaMark JSON', async () => {
+    const { exportLumaMarkJson, parseLumaMarkJson } = await import('../../packages/import-export/src/index');
+    const bookmarklet = makeBookmark({ url: 'javascript:void(0)', title: 'Tool' });
+    const parsed = parseLumaMarkJson(exportLumaMarkJson([bookmarklet], [], stamp));
+    expect(parsed.issues).toEqual([]);
+    expect(parsed.bookmarks[0]).toMatchObject({ url: 'javascript:void(0)', title: 'Tool' });
+  });
+
+  it('hides separators from lists, counts and the bar, and renders non-web links without a live href', async () => {
+    const { SEPARATOR_URL } = await import('../../packages/domain/src/index');
+    const { filterBookmarks, defaultLibraryFilters } = await import('../../apps/extension/src/ui/index');
+    const { buildBar, renderBarEntries } = await import('../../apps/extension/src/ui/bar');
+    const bar = folder('bar', 'Bar', { toolbar: true });
+    const separator = makeBookmark({ url: SEPARATOR_URL, title: '', collectionId: 'bar', position: 1 });
+    const page = makeBookmark({ url: 'https://a.example/', title: 'A', collectionId: 'bar', position: 0 });
+    const tool = makeBookmark({ url: 'javascript:void(0)', title: 'Tool', collectionId: 'bar', position: 2 });
+    const all = [page, separator, tool];
+    expect(filterBookmarks(all, defaultLibraryFilters()).map((item) => item.title).sort()).toEqual(['A', 'Tool']);
+    expect(folderCounts(all)).toEqual({ bar: 2 });
+    const model = buildBar(all, [bar]);
+    expect(model.items.map((item) => item.title)).toEqual(['A', 'Tool']);
+    const markup = renderBarEntries(model.items, 'bar');
+    expect(markup).toContain('href="https://a.example/"');
+    expect(markup).not.toContain('javascript:');
+    const card = renderBookmarkCard(tool);
+    expect(card).toContain('<span class="bookmark-title"');
+    expect(card).not.toContain('href="javascript:');
+  });
+});

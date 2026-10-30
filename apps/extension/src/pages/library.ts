@@ -213,7 +213,8 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     const editor = event.currentTarget as HTMLFormElement;
     const url = (editor.elements.namedItem('url') as HTMLInputElement).value;
     const error = root.querySelector<HTMLElement>('#editor-error');
-    if (!isHttpUrl(url)) {
+    const original = bookmarks.find((item) => item.id === editingId);
+    if (!isHttpUrl(url) && (!original || isHttpUrl(original.url) || !url.trim())) {
       if (error) error.textContent = text.invalidUrl;
       return;
     }

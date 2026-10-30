@@ -11,23 +11,29 @@
  *   - unlinked native nodes / records are paired (same URL or folder name in the same
  *     folder) before anything is created, so joining a second browser does not duplicate.
  * The pass is idempotent: the bookmark events caused by its own writes find nothing to do.
+ *
+ * Roots: every browser root (bookmarks bar, Firefox's Bookmarks Menu, mobile bookmarks) maps to a fixed store
+ * folder. A browser without that root (Chrome/Edge have no menu) keeps those records in "Other bookmarks"
+ * without creating any folder; the records still remember their root, so Firefox puts them back in its menu.
  */
 import {
   applyBookmarkUpdate,
   applyCollectionUpdate,
   domainFromUrl,
+  isSeparator,
   makeBookmark,
   migrateBookmark,
   migrateCollection,
-  normalizeUrl,
+  normalizeBookmarkUrl,
   orderedSiblings,
+  SEPARATOR_URL,
+  urlKey,
   type Bookmark,
   type Collection,
 } from '../../../../packages/domain/src/index';
 import type { NativeBookmarksApi, NativeNode } from '../../../../packages/browser/src/index';
 
 export type { NativeBookmarksApi, NativeNode };
-
 
 export interface BridgeRepository {
   list(query?: { includeDeleted?: boolean }): Promise<Bookmark[]>;
@@ -51,6 +57,8 @@ export interface BridgeState {
   links: BridgeLink[];
   /** Linked record ids per native folder, in native order, as left by the last pass. */
   orders: Record<string, string[]>;
+  /** Records this browser refused to create (e.g. another browser's internal page), by revision tried. */
+  unplaceable?: Record<string, number>;
   lastReconcileAt?: string;
 }
 
@@ -63,14 +71,26 @@ export interface ReconcileReport {
   repoChanges: number;
   nativeChanges: number;
   linked: number;
+  /** Native items left alone: enterprise-managed bookmarks, Firefox place: queries, separators where unsupported. */
   skipped: number;
+  /** Synced records this browser cannot hold. */
+  unplaceable: number;
   errors: string[];
 }
 
 export const ROOT_TOOLBAR_ID = 'root-toolbar';
 export const ROOT_MENU_ID = 'root-menu';
+export const ROOT_MOBILE_ID = 'root-mobile';
 
 type RootKind = 'toolbar' | 'other' | 'menu' | 'mobile' | 'unknown';
+type MappedRoot = 'toolbar' | 'menu' | 'mobile';
+
+const ROOT_RECORDS: Record<MappedRoot, { id: string; name: string; position: number }> = {
+  toolbar: { id: ROOT_TOOLBAR_ID, name: 'Bookmarks bar', position: 0 },
+  menu: { id: ROOT_MENU_ID, name: 'Bookmarks Menu', position: 1 },
+  mobile: { id: ROOT_MOBILE_ID, name: 'Mobile bookmarks', position: 2 },
+};
+const FIXED_ROOT_IDS = new Set([ROOT_TOOLBAR_ID, ROOT_MENU_ID, ROOT_MOBILE_ID]);
 
 export function nativeRootKind(node: Pick<NativeNode, 'id' | 'folderType'>): RootKind {
   const { id, folderType } = node;
@@ -81,16 +101,20 @@ export function nativeRootKind(node: Pick<NativeNode, 'id' | 'folderType'>): Roo
   return 'unknown';
 }
 
-const isFolderNode = (node: NativeNode) => !node.url && node.type !== 'separator';
+const isSeparatorNode = (node: NativeNode) => node.type === 'separator';
+const isFolderNode = (node: NativeNode) => !node.url && !isSeparatorNode(node);
 
-function syncableUrl(url: string | undefined): string | undefined {
+function storableUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
-  try { return normalizeUrl(url); } catch { return undefined; }
+  try { return normalizeBookmarkUrl(url); } catch { return undefined; }
 }
+
+/** Stored URL for a native bookmark or separator. */
+const nodeUrl = (node: NativeNode) => (isSeparatorNode(node) ? SEPARATOR_URL : storableUrl(node.url));
 
 function sameUrl(left: string | undefined, right: string | undefined): boolean {
   if (!left || !right) return false;
-  return (syncableUrl(left) ?? left) === (syncableUrl(right) ?? right);
+  return urlKey(left) === urlKey(right);
 }
 
 const emptyState = (): BridgeState => ({ version: 1, links: [], orders: {} });
@@ -99,13 +123,19 @@ export function normalizeBridgeState(value: unknown): BridgeState {
   if (!value || typeof value !== 'object') return emptyState();
   const raw = value as Partial<BridgeState>;
   const links = Array.isArray(raw.links) ? raw.links.filter((link): link is BridgeLink => Boolean(link && typeof link.lumaId === 'string' && typeof link.nativeId === 'string')) : [];
-  return { version: 1, links, orders: raw.orders && typeof raw.orders === 'object' ? { ...raw.orders } : {}, lastReconcileAt: raw.lastReconcileAt };
+  return {
+    version: 1,
+    links,
+    orders: raw.orders && typeof raw.orders === 'object' ? { ...raw.orders } : {},
+    unplaceable: raw.unplaceable && typeof raw.unplaceable === 'object' ? { ...raw.unplaceable } : {},
+    lastReconcileAt: raw.lastReconcileAt,
+  };
 }
 
 const sameList = (left: readonly string[], right: readonly string[]) => left.length === right.length && left.every((value, index) => value === right[index]);
 
 export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repository: BridgeRepository, store: BridgeStateStore): Promise<ReconcileReport> {
-  const report: ReconcileReport = { repoChanges: 0, nativeChanges: 0, linked: 0, skipped: 0, errors: [] };
+  const report: ReconcileReport = { repoChanges: 0, nativeChanges: 0, linked: 0, skipped: 0, unplaceable: 0, errors: [] };
   const state = normalizeBridgeState(await store.load());
   const stamp = () => new Date().toISOString();
 
@@ -114,33 +144,34 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
     const tree = await native.getTree();
     const nodes = new Map<string, NativeNode>();
     const roots: Partial<Record<RootKind, NativeNode>> = {};
+    for (const root of tree[0]?.children ?? []) {
+      const kind = nativeRootKind(root);
+      if (kind !== 'unknown' && !roots[kind]) roots[kind] = root;
+    }
+    // Only Firefox has separators (and a Bookmarks Menu); Chrome and Edge have neither.
+    const separators = Boolean(roots.menu);
     const preorder: NativeNode[] = [];
     let skipped = 0;
     const walk = (parent: NativeNode) => {
       const children = [...(parent.children ?? [])].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
       for (const child of children) {
-        if (child.type === 'separator' || child.unmodifiable) { skipped += 1; continue; }
-        if (!isFolderNode(child) && !syncableUrl(child.url)) { skipped += 1; continue; }
+        if (child.unmodifiable) { skipped += 1; continue; }
+        if (isSeparatorNode(child) ? !separators : !isFolderNode(child) && !nodeUrl(child)) { skipped += 1; continue; }
         const node = { ...child, parentId: child.parentId ?? parent.id };
         nodes.set(node.id, node);
         preorder.push(node);
         if (isFolderNode(child)) walk(child);
       }
     };
-    for (const root of tree[0]?.children ?? []) {
-      const kind = nativeRootKind(root);
-      if (kind === 'mobile' || kind === 'unknown' || roots[kind]) continue;
-      roots[kind] = root;
-      walk(root);
-    }
-    return { nodes, roots, preorder, skipped };
+    for (const root of Object.values(roots)) walk(root!);
+    return { nodes, roots, preorder, skipped, separators };
   };
   let native0 = await readTree();
   const { roots } = native0;
   const otherRoot = roots.other ?? roots.toolbar;
   if (!otherRoot) return report;
   report.skipped = native0.skipped;
-  const rootIds = new Set([roots.toolbar?.id, roots.other?.id, roots.menu?.id].filter((id): id is string => Boolean(id)));
+  const rootIds = new Set([roots.toolbar?.id, roots.other?.id, roots.menu?.id, roots.mobile?.id].filter((id): id is string => Boolean(id)));
 
   // ── store ──
   const bookmarks = new Map((await repository.list({ includeDeleted: true })).map((item) => [item.id, migrateBookmark(item)] as const));
@@ -158,6 +189,7 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
     }
   };
   const recordOf = (link: Pick<BridgeLink, 'kind' | 'lumaId'>): Bookmark | Collection | undefined => (link.kind === 'bookmark' ? bookmarks.get(link.lumaId) : collections.get(link.lumaId));
+  const parentOf = (id: string): string | undefined => (collections.has(id) ? collections.get(id)!.parentId : bookmarks.get(id)?.collectionId) ?? undefined;
 
   // ── links ──
   const byLuma = new Map<string, BridgeLink>();
@@ -169,41 +201,47 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
     try { await work(); } catch (error) { report.errors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`); }
   };
 
-  // ── roots: bookmarks bar ↔ toolbar folder, other bookmarks ↔ top level, Firefox menu ↔ fixed folder ──
+  // ── roots ──
+  /** Native folders an older version created for a store root this browser lacks; emptied and removed below. */
+  const retired = new Set<string>();
   for (const link of [...byLuma.values()]) {
     if (link.kind === 'root' && !rootIds.has(link.nativeId)) dropLink(link);
+    if (link.kind === 'folder' && FIXED_ROOT_IDS.has(link.lumaId)) { dropLink(link); retired.add(link.nativeId); }
   }
-  const ensureRoot = async (node: NativeNode | undefined, kind: 'toolbar' | 'menu') => {
+  const ensureRoot = async (node: NativeNode | undefined, kind: MappedRoot) => {
     if (!node) return;
     const existing = byNative.get(node.id);
     const current = existing ? collections.get(existing.lumaId) : undefined;
     if (existing && current && !current.deletedAt) return;
     if (existing) dropLink(existing);
-    const fixedId = kind === 'toolbar' ? ROOT_TOOLBAR_ID : ROOT_MENU_ID;
+    const fixed = ROOT_RECORDS[kind];
     const live = [...collections.values()].filter((item) => !item.deletedAt && !byLuma.has(item.id));
     let chosen = kind === 'toolbar'
-      ? live.find((item) => item.id === fixedId) ?? live.filter((item) => item.toolbar).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))[0]
-      : live.find((item) => item.id === fixedId);
+      ? live.find((item) => item.id === fixed.id) ?? live.filter((item) => item.toolbar).sort((a, b) => a.position - b.position || a.id.localeCompare(b.id))[0]
+      : live.find((item) => item.id === fixed.id);
     if (!chosen) {
       const now = stamp();
-      const previous = collections.get(fixedId);
+      const previous = collections.get(fixed.id);
       chosen = previous
         ? { ...previous, deletedAt: undefined, updatedAt: now, revision: previous.revision + 1 }
-        : { id: fixedId, name: node.title || (kind === 'toolbar' ? 'Bookmarks bar' : 'Bookmarks menu'), position: kind === 'toolbar' ? 0 : 1, toolbar: kind === 'toolbar', createdAt: now, updatedAt: now, revision: 1 };
+        : { id: fixed.id, name: node.title || fixed.name, position: fixed.position, toolbar: kind === 'toolbar', createdAt: now, updatedAt: now, revision: 1 };
       await putCollection(chosen);
     }
     addLink({ lumaId: chosen.id, nativeId: node.id, kind: 'root', title: node.title, parent: undefined, revision: chosen.revision });
   };
   await ensureRoot(roots.toolbar, 'toolbar');
-  // Firefox's Bookmarks Menu only becomes a synced folder once it holds something (or another browser sent one).
-  const menuInUse = Boolean(roots.menu && (native0.preorder.some((node) => node.parentId === roots.menu!.id) || (collections.get(ROOT_MENU_ID) && !collections.get(ROOT_MENU_ID)!.deletedAt)));
-  if (menuInUse) await ensureRoot(roots.menu, 'menu');
+  // The menu and mobile roots become store folders once they hold something here or arrive from another browser.
+  for (const kind of ['menu', 'mobile'] as const) {
+    const node = roots[kind];
+    const record = collections.get(ROOT_RECORDS[kind].id);
+    if (node && (native0.preorder.some((item) => item.parentId === node.id) || (record && !record.deletedAt))) await ensureRoot(node, kind);
+  }
 
   const nativeToRepoParent = (nativeParentId: string | undefined): string | undefined => {
     if (!nativeParentId || nativeParentId === otherRoot.id) return undefined;
     return byNative.get(nativeParentId)?.lumaId;
   };
-  /** Native folder for a record's parent; deleted or unknown folders fall back to their nearest live ancestor. */
+  /** Native folder for a record's parent; unlinked roots and deleted folders fall back to their nearest live ancestor. */
   const repoToNativeParent = (repoParentId: string | undefined): string => {
     let current = repoParentId;
     const seen = new Set<string>();
@@ -217,6 +255,8 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
     }
     return otherRoot.id;
   };
+  /** Store root folders that have no root in this browser; their records live in "Other bookmarks". */
+  const virtualRoots = () => [...FIXED_ROOT_IDS].filter((id) => collections.has(id) && !collections.get(id)!.deletedAt && !byLuma.has(id));
 
   // Records removed outright (undo of a fresh save) mean "delete in the browser". A store that lost most of
   // its linked records was reset instead: forget those links so pairing re-imports rather than deleting.
@@ -238,7 +278,9 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
   /** Native folders that gained children in the browser since the last pass. */
   const nativeAdded = new Set<string>();
   for (const node of native0.preorder) {
+    if (retired.has(node.id)) continue;
     const folder = isFolderNode(node);
+    const separator = isSeparatorNode(node);
     const parentLuma = nativeToRepoParent(node.parentId);
     let link = byNative.get(node.id);
     if (link && (link.kind === 'root' || (link.kind === 'folder') !== folder || !recordOf(link))) { dropLink(link); link = undefined; }
@@ -255,8 +297,8 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
             link!.revision = (collections.get(record.id) ?? next).revision;
           } else {
             const bookmark = record as Bookmark;
-            const url = syncableUrl(node.url) ?? bookmark.url;
-            const next = applyBookmarkUpdate(bookmark, { title: node.title, ...(node.parentId !== link!.parent ? { collectionId: parentLuma ?? null } : {}) });
+            const url = nodeUrl(node) ?? bookmark.url;
+            const next = applyBookmarkUpdate(bookmark, { ...(separator ? {} : { title: node.title }), ...(node.parentId !== link!.parent ? { collectionId: parentLuma ?? null } : {}) });
             const stored = { ...next, url, domain: domainFromUrl(url) };
             await putBookmark(stored);
             link!.revision = stored.revision;
@@ -266,10 +308,10 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
       }
       continue;
     }
-    // Unlinked native node: pair with an unlinked record in the same folder, otherwise create one.
+    // Unlinked native node: pair with an unlinked record that belongs in the same native folder, otherwise create one.
     if (folder) {
-      const candidate = [...collections.values()].find((item) => !item.deletedAt && !byLuma.has(item.id) && !item.toolbar
-        && (item.parentId ?? undefined) === parentLuma && item.name.trim() === node.title.trim());
+      const candidate = [...collections.values()].find((item) => !item.deletedAt && !byLuma.has(item.id) && !item.toolbar && !FIXED_ROOT_IDS.has(item.id)
+        && repoToNativeParent(item.parentId) === node.parentId && item.name.trim() === node.title.trim());
       if (candidate) {
         addLink({ lumaId: candidate.id, nativeId: node.id, kind: 'folder', title: node.title, parent: node.parentId, revision: candidate.revision });
         report.linked += 1;
@@ -283,18 +325,20 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
       report.linked += 1;
       continue;
     }
+    const url = nodeUrl(node)!;
     const candidate = [...bookmarks.values()].find((item) => !item.deletedAt && !byLuma.has(item.id)
-      && (item.collectionId ?? undefined) === parentLuma && sameUrl(item.url, node.url));
+      && repoToNativeParent(item.collectionId) === node.parentId && sameUrl(item.url, url));
     if (candidate) {
       addLink({ lumaId: candidate.id, nativeId: node.id, kind: 'bookmark', title: node.title, url: node.url, parent: node.parentId, revision: candidate.revision });
       // The store is the synced copy; let it correct the native title.
-      if (candidate.title !== node.title) forceNative.add(candidate.id);
+      if (!separator && candidate.title !== node.title) forceNative.add(candidate.id);
       report.linked += 1;
       continue;
     }
     await safely(`import ${node.id}`, async () => {
       const now = stamp();
-      const created = makeBookmark({ url: node.url!, title: node.title, collectionId: parentLuma, position: node.index ?? 0 }, now);
+      const created = makeBookmark({ url, title: separator ? '' : node.title, collectionId: parentLuma, position: node.index ?? 0 }, now);
+      if (separator) created.title = '';
       if (node.dateAdded) created.createdAt = new Date(node.dateAdded).toISOString();
       if (node.parentId) nativeAdded.add(node.parentId);
       await putBookmark(created);
@@ -347,7 +391,9 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
   };
   const mergedThisPass = new Set<string>();
 
-  const unlinkedFolders = [...collections.values()].filter((item) => !item.deletedAt && !byLuma.has(item.id)).sort((a, b) => depth(a) - depth(b) || a.position - b.position);
+  const unlinkedFolders = [...collections.values()]
+    .filter((item) => !item.deletedAt && !byLuma.has(item.id) && !(FIXED_ROOT_IDS.has(item.id) && !item.toolbar))
+    .sort((a, b) => depth(a) - depth(b) || a.position - b.position);
   for (const folder of unlinkedFolders) {
     const current = collections.get(folder.id);
     if (!current || current.deletedAt || byLuma.has(current.id)) continue;
@@ -372,6 +418,7 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
       });
       continue;
     }
+    if (current.toolbar) continue; // no bookmarks bar in this browser: its records stay in "Other bookmarks"
     await safely(`create folder ${current.id}`, async () => {
       const created = await native.create({ parentId: nativeParent, title: current.name });
       report.nativeChanges += 1;
@@ -379,12 +426,16 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
     });
   }
 
+  const unplaceable: Record<string, number> = {};
   const byPosition = (a: Bookmark, b: Bookmark) => a.position - b.position || a.id.localeCompare(b.id);
   for (const bookmark of [...bookmarks.values()].sort(byPosition)) {
     const current = bookmarks.get(bookmark.id)!;
     if (current.deletedAt || byLuma.has(current.id)) continue;
+    const separator = isSeparator(current);
+    if (separator && !native0.separators) continue; // Chrome and Edge have no separators
+    if (state.unplaceable?.[current.id] === current.revision) { unplaceable[current.id] = current.revision; continue; }
     const nativeParent = repoToNativeParent(current.collectionId);
-    const duplicate = [...byLuma.values()].find((link) => link.kind === 'bookmark' && !mergedThisPass.has(link.lumaId) && link.parent === nativeParent
+    const duplicate = separator ? undefined : [...byLuma.values()].find((link) => link.kind === 'bookmark' && !mergedThisPass.has(link.lumaId) && link.parent === nativeParent
       && !bookmarks.get(link.lumaId)?.deletedAt && sameUrl(bookmarks.get(link.lumaId)?.url, current.url));
     const duplicateRecord = duplicate ? bookmarks.get(duplicate.lumaId) : undefined;
     if (duplicate && duplicateRecord) {
@@ -401,12 +452,18 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
       });
       continue;
     }
-    await safely(`create bookmark ${current.id}`, async () => {
-      const created = await native.create({ parentId: nativeParent, title: current.title, url: current.url });
+    try {
+      const created = separator
+        ? await native.create({ parentId: nativeParent, type: 'separator' })
+        : await native.create({ parentId: nativeParent, title: current.title, url: current.url });
       report.nativeChanges += 1;
-      addLink({ lumaId: current.id, nativeId: created.id, kind: 'bookmark', title: created.title ?? current.title, url: created.url ?? current.url, parent: nativeParent, revision: current.revision });
-    });
+      addLink({ lumaId: current.id, nativeId: created.id, kind: 'bookmark', title: created.title ?? (separator ? '' : current.title), url: separator ? created.url : created.url ?? current.url, parent: nativeParent, revision: current.revision });
+    } catch {
+      // This browser rejects the address (e.g. another browser's internal page). Retry only after the record changes.
+      unplaceable[current.id] = current.revision;
+    }
   }
+  report.unplaceable = Object.keys(unplaceable).length;
 
   // Linked records whose content or folder differs from the browser.
   for (const link of [...byLuma.values()]) {
@@ -414,12 +471,13 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
     const record = recordOf(link);
     if (!record || record.deletedAt) continue;
     const node = native0.nodes.get(link.nativeId);
+    const separator = link.kind === 'bookmark' && isSeparator(record as Bookmark);
     const repoChanged = record.revision !== link.revision || forceNative.has(record.id);
     const title = link.kind === 'folder' ? (record as Collection).name : (record as Bookmark).title;
     const url = link.kind === 'bookmark' ? (record as Bookmark).url : undefined;
     const desiredParent = repoToNativeParent(link.kind === 'folder' ? (record as Collection).parentId : (record as Bookmark).collectionId);
     await safely(`update ${record.id}`, async () => {
-      if (repoChanged && (title !== link.title || (url !== undefined && !sameUrl(url, link.url)))) {
+      if (!separator && repoChanged && (title !== link.title || (url !== undefined && !sameUrl(url, link.url)))) {
         await native.update(link.nativeId, url !== undefined ? { title, url } : { title });
         report.nativeChanges += 1;
         link.title = title;
@@ -435,6 +493,16 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
     });
   }
 
+  if (retired.size) {
+    const now = await readTree();
+    for (const id of retired) {
+      const node = now.nodes.get(id);
+      if (node && ![...now.nodes.values()].some((child) => child.parentId === id)) {
+        await safely(`retire ${id}`, async () => { await native.remove(id); report.nativeChanges += 1; });
+      }
+    }
+  }
+
   // Records deleted in the store (here or on another browser): bookmarks first, then deepest folders.
   const removals = [...byLuma.values()].filter((link) => link.kind !== 'root' && recordOf(link)?.deletedAt);
   removals.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'bookmark' ? -1 : 1)
@@ -448,46 +516,46 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
   }
 
   // ── 4. sibling order ──
+  // A native folder shows the children of one store folder; "Other bookmarks" also shows the store roots this
+  // browser lacks (e.g. Firefox's menu in Chrome), each group after the previous one.
   const tree = report.nativeChanges ? await readTree() : native0;
   const orders: Record<string, string[]> = {};
+  const virtual = virtualRoots();
   for (const folderId of folderIds()) {
     if (!tree.nodes.has(folderId) && !rootIds.has(folderId)) continue;
     const nativeOrder = nativeOrderOf(tree, folderId);
-    const repoParent = nativeToRepoParent(folderId);
-    const isChildOf = (id: string) => {
-      const link = byLuma.get(id);
-      if (!link) return false;
-      const parent = link.kind === 'folder' ? collections.get(id)?.parentId : bookmarks.get(id)?.collectionId;
-      return (parent ?? undefined) === repoParent;
-    };
+    const groups: Array<string | undefined> = folderId === otherRoot.id ? [undefined, ...virtual] : [nativeToRepoParent(folderId)];
     if (nativeReordered.has(folderId)) {
-      // The browser is authoritative for this folder: store positions follow native order.
-      for (let index = 0; index < nativeOrder.length; index += 1) {
-        const id = nativeOrder[index];
-        if (!isChildOf(id)) continue;
-        const link = byLuma.get(id)!;
-        await safely(`position ${id}`, async () => {
-          if (link.kind === 'folder') {
-            const current = collections.get(id)!;
-            if (current.position === index) return;
-            const next = applyCollectionUpdate(current, { position: index });
-            await putCollection(next);
-            link.revision = next.revision;
-          } else {
-            const current = bookmarks.get(id)!;
-            if (current.position === index) return;
-            const next = applyBookmarkUpdate(current, { position: index });
-            await putBookmark(next);
-            link.revision = next.revision;
-          }
-        });
+      // The browser is authoritative for this folder: store positions follow native order within each group.
+      for (const group of groups) {
+        const members = nativeOrder.filter((id) => parentOf(id) === group);
+        for (let index = 0; index < members.length; index += 1) {
+          const id = members[index];
+          const link = byLuma.get(id)!;
+          await safely(`position ${id}`, async () => {
+            if (link.kind === 'folder') {
+              const current = collections.get(id)!;
+              if (current.position === index) return;
+              const next = applyCollectionUpdate(current, { position: index });
+              await putCollection(next);
+              link.revision = next.revision;
+            } else {
+              const current = bookmarks.get(id)!;
+              if (current.position === index) return;
+              const next = applyBookmarkUpdate(current, { position: index });
+              await putBookmark(next);
+              link.revision = next.revision;
+            }
+          });
+        }
       }
       orders[folderId] = nativeOrder;
       continue;
     }
     const present = new Set(nativeOrder);
-    const fromStore = orderedSiblings(repoParent, [...bookmarks.values()], [...collections.values()]).map((entry) => entry.record.id).filter((id) => present.has(id));
-    const desired = [...fromStore, ...nativeOrder.filter((id) => !fromStore.includes(id))];
+    const fromStore = groups.flatMap((group) => orderedSiblings(group, [...bookmarks.values()], [...collections.values()]).map((entry) => entry.record.id)).filter((id) => present.has(id));
+    const placed = new Set(fromStore);
+    const desired = [...fromStore, ...nativeOrder.filter((id) => !placed.has(id))];
     if (!sameList(desired, nativeOrder)) {
       // Move everything from the first difference to the end, in store order.
       let first = 0;
@@ -502,6 +570,6 @@ export async function reconcileNativeBookmarks(native: NativeBookmarksApi, repos
     orders[folderId] = desired;
   }
 
-  await store.save({ version: 1, links: [...byLuma.values()], orders, lastReconcileAt: stamp() });
+  await store.save({ version: 1, links: [...byLuma.values()], orders, unplaceable, lastReconcileAt: stamp() });
   return report;
 }

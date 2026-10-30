@@ -7,6 +7,7 @@ import {
   dropIntent,
   hasDisplayableBookmarks,
   homeSyncPhrase,
+  isHttpUrl,
   menuParentId,
   nextIndex,
   planWebSearch,
@@ -514,7 +515,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     const list = results();
     if (!input || !list) return;
     const matches = searchBookmarks(bookmarks, input.value);
-    list.innerHTML = matches.map((bookmark) => `<li role="option"><a href="${escapeHtml(bookmark.url)}">${escapeHtml(bookmark.title)}</a></li>`).join('');
+    list.innerHTML = matches.map((bookmark) => `<li role="option"><a${isHttpUrl(bookmark.url) ? ` href="${escapeHtml(bookmark.url)}"` : ''}>${escapeHtml(bookmark.title)}</a></li>`).join('');
   };
   searchInput()?.addEventListener('input', () => {
     paintSearch();
