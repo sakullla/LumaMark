@@ -178,11 +178,11 @@ describe('bookmark bar and shared surfaces', () => {
     expect(renderLibraryResults([], null, defaultLibraryFilters())).toContain('Save current page');
   });
 
-  it('keeps new-tab override free of the bookmarks permission and dialog functions', () => {
+  it('leaves the new tab page alone, syncs browser bookmarks and avoids dialog functions', () => {
     for (const name of ['chrome', 'firefox']) {
       const manifest = JSON.parse(readFileSync(`apps/extension/manifest.${name}.json`, 'utf8'));
-      expect(manifest.chrome_url_overrides.newtab).toBe('home.html');
-      expect(manifest.permissions).not.toContain('bookmarks');
+      expect(manifest.chrome_url_overrides).toBeUndefined();
+      expect(manifest.permissions).toContain('bookmarks');
       expect(manifest.permissions).toContain('alarms');
       if (name === 'chrome') expect(manifest.host_permissions).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*']));
     }

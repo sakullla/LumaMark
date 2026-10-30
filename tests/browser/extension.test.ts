@@ -74,8 +74,10 @@ describe('browser adapter', () => {
         expect(existsSync(`dist/extension/${target}/${file}`)).toBe(true);
       }
       const manifest = JSON.parse(readFileSync(`dist/extension/${target}/manifest.json`, 'utf8'));
-      expect(manifest.chrome_url_overrides.newtab).toBe('home.html');
-      expect(manifest.permissions).not.toContain('bookmarks');
+      // LumaMark no longer replaces the new tab page; it syncs the browser's own bookmarks instead.
+      expect(manifest.chrome_url_overrides).toBeUndefined();
+      if (target === 'safari') expect(manifest.permissions).not.toContain('bookmarks');
+      else expect(manifest.permissions).toContain('bookmarks');
       expect(manifest.permissions).toContain('alarms');
       if (target === 'chrome' || target === 'safari') expect(manifest.host_permissions).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*']));
       const background = readFileSync(`dist/extension/${target}/background.js`, 'utf8');

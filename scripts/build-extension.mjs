@@ -46,7 +46,10 @@ for (const target of ['chrome', 'firefox', 'safari']) {
   const manifestPath = target === 'safari'
     ? resolve(root, 'apps/extension/manifest.chrome.json')
     : resolve(root, `apps/extension/manifest.${target}.json`);
-  await writeFile(resolve(targetDir, 'manifest.json'), await readFile(manifestPath));
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  // Safari Web Extensions have no bookmarks API; LumaMark keeps its own list there.
+  if (target === 'safari') manifest.permissions = manifest.permissions.filter((permission) => permission !== 'bookmarks');
+  await writeFile(resolve(targetDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await cp(resolve(root, 'apps/extension/src/assets'), resolve(targetDir, 'assets'), { recursive: true });
 
   await bundleSource('apps/extension/src/background/index.ts', resolve(targetDir, 'background.js'));

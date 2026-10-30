@@ -29,6 +29,7 @@ import {
 import { copyFor, languageFromApi, notificationCopy } from '../ui/copy';
 import { DEFAULT_SEARCH_URL, nextSiblingPosition, normalizeSearchUrl, toolbarFolder } from '../ui/bar';
 import { placeItem } from './place';
+import { normalizeBridgeState, reconcileNativeBookmarks, type BridgeState, type NativeBookmarksApi, type ReconcileReport } from './native';
 import { probeWebDav } from './probe';
 
 function webDavClient(config: SyncConfig): WebDavClient {
@@ -94,9 +95,31 @@ function isStoredUndo(value: unknown): value is StoredUndo {
 }
 
 const AUTO_SYNC_ALARM = 'lumamark-auto-sync';
+const NATIVE_STATE_KEY = 'nativeBridge';
+const NATIVE_ENABLED_KEY = 'nativeSync';
 const AUTO_SYNC_PERIOD_MINUTES = 5;
 
-export function startBackground(api = resolveExtensionApi(), repository = new IndexedDbRepository()): void {
+const STORE_WRITES = new Set<PropertyKey>(['put', 'remove', 'putCollection']);
+
+/** The store as the rest of the background sees it: every write is followed by a pass over the browser's bookmarks. */
+function notifyingRepository<T extends object>(store: T, onWrite: () => void): T {
+  return new Proxy(store, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      if (!STORE_WRITES.has(property)) return value.bind(target);
+      return async (...args: unknown[]) => {
+        const result = await value.apply(target, args);
+        onWrite();
+        return result;
+      };
+    },
+  });
+}
+
+export function startBackground(api = resolveExtensionApi(), store = new IndexedDbRepository()): void {
+  let onStoreWrite = () => {};
+  const repository = notifyingRepository(store, () => onStoreWrite());
   // The URL index returns one row. A tombstone can sort before a live bookmark with the same URL.
   const bookmarkForSave = async (url: string): Promise<Bookmark | undefined> => {
     let normalized = url;
@@ -297,13 +320,82 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
     syncConfig = await repository.getSyncConfig();
     return syncConfig;
   };
+
+  // ── browser bookmarks bridge ──
+  const nativeApi: NativeBookmarksApi | undefined = api.bookmarks;
+  let nativeChain: Promise<unknown> = Promise.resolve();
+  let nativeTimer: ReturnType<typeof setTimeout> | undefined;
+  let pushTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastNative: { at?: string; report?: ReconcileReport; error?: string } = {};
+  let nativeEnabledMemory = true;
+  const nativeEnabled = async (): Promise<boolean> => {
+    if (!nativeApi) return false;
+    try {
+      const stored = await api.storage?.local.get(NATIVE_ENABLED_KEY);
+      const value = stored?.[NATIVE_ENABLED_KEY];
+      if (typeof value === 'boolean') nativeEnabledMemory = value;
+    } catch { /* keep the value from this session */ }
+    return nativeEnabledMemory;
+  };
+  const bridgeStore = {
+    load: async (): Promise<BridgeState | undefined> => {
+      try { return normalizeBridgeState((await api.storage?.local.get(NATIVE_STATE_KEY))?.[NATIVE_STATE_KEY]); } catch { return undefined; }
+    },
+    save: async (state: BridgeState) => { await api.storage?.local.set({ [NATIVE_STATE_KEY]: state }); },
+  };
+  /** Run one reconcile pass after any pass already running. */
+  const reconcileNow = (): Promise<ReconcileReport | undefined> => {
+    const run = nativeChain.then(async () => {
+      if (!nativeApi || !(await nativeEnabled())) return undefined;
+      try {
+        const report = await reconcileNativeBookmarks(nativeApi, store, bridgeStore);
+        lastNative = { at: new Date().toISOString(), report, error: report.errors[0] };
+        if (report.repoChanges) schedulePush();
+        return report;
+      } catch (error) {
+        lastNative = { ...lastNative, error: error instanceof Error ? error.message : String(error) };
+        return undefined;
+      }
+    });
+    nativeChain = run.catch(() => undefined);
+    return run;
+  };
+  const queueReconcile = (delay = 400) => {
+    if (!nativeApi) return;
+    if (nativeTimer) clearTimeout(nativeTimer);
+    nativeTimer = setTimeout(() => { nativeTimer = undefined; void reconcileNow(); }, delay);
+  };
+  const runSync = async () => {
+    const config = syncConfig ?? await loadSyncConfig();
+    if (!config?.url) return { ok: false, status: 'error' as const, error: 'WebDAV is not configured' };
+    await reconcileNow();
+    const result = await new WebDavSyncEngine(repository, webDavClient(config)).sync();
+    await reconcileNow();
+    return result;
+  };
+  // Publish browser-side changes soon instead of waiting for the next alarm.
+  function schedulePush() {
+    if (pushTimer) clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => {
+      pushTimer = undefined;
+      void (async () => {
+        const config = syncConfig ?? await loadSyncConfig();
+        if (config?.autoSync && config.url) await runAutoSync();
+      })();
+    }, 15_000);
+  }
+  for (const event of [nativeApi?.onCreated, nativeApi?.onRemoved, nativeApi?.onChanged, nativeApi?.onMoved, nativeApi?.onChildrenReordered, nativeApi?.onImportEnded]) {
+    event?.addListener(() => queueReconcile());
+  }
+  onStoreWrite = () => queueReconcile(150);
+  queueReconcile(0);
   const runAutoSync = async () => {
     const config = syncConfig ?? await loadSyncConfig();
     if (!config?.autoSync || !config.url) {
       await api.alarms?.clear(AUTO_SYNC_ALARM);
       return;
     }
-    const result = await new WebDavSyncEngine(repository, webDavClient(config)).sync();
+    const result = await runSync();
     if (result.status !== 'error') return;
     syncConfig = { ...config, autoSync: false };
     await repository.setSyncConfig(syncConfig);
@@ -555,10 +647,29 @@ export function startBackground(api = resolveExtensionApi(), repository = new In
       await scheduleAutoSync();
       return { ok: true, probe: probe.kind, autoSync, status: probe.status };
     });
+    if (type === 'lumamark-native-status') return accept(async () => {
+      const state = await bridgeStore.load();
+      return {
+        ok: true,
+        supported: Boolean(nativeApi),
+        enabled: await nativeEnabled(),
+        linked: state?.links.filter((link) => link.kind !== 'root').length ?? 0,
+        lastReconcileAt: lastNative.at ?? state?.lastReconcileAt,
+        error: lastNative.error,
+      };
+    });
+    if (type === 'lumamark-set-native-sync') return accept(async () => {
+      nativeEnabledMemory = Boolean(payload.enabled);
+      await api.storage?.local.set({ [NATIVE_ENABLED_KEY]: nativeEnabledMemory });
+      // Links start over when re-enabled, so pairing (not deletion) decides what happened meanwhile.
+      if (!nativeEnabledMemory) await api.storage?.local.set({ [NATIVE_STATE_KEY]: { version: 1, links: [], orders: {} } });
+      const report = nativeEnabledMemory ? await reconcileNow() : undefined;
+      return { ok: true, enabled: nativeEnabledMemory, report };
+    });
     if (type === 'lumamark-sync') return accept(async () => {
       const config = syncConfig ?? await loadSyncConfig();
       if (!config?.url) return { ok: false, status: 'error', error: 'WebDAV is not configured' };
-      const result = await new WebDavSyncEngine(repository, webDavClient(config)).sync();
+      const result = await runSync();
       if (result.status === 'error' && config.autoSync) {
         syncConfig = { ...config, autoSync: false };
         await repository.setSyncConfig(syncConfig);

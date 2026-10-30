@@ -82,6 +82,37 @@ export interface ExtensionAlarms {
   onAlarm?: { addListener(listener: (alarm: ExtensionAlarm) => void): void };
 }
 
+export interface NativeNode {
+  id: string;
+  parentId?: string;
+  index?: number;
+  title: string;
+  url?: string;
+  type?: string;
+  folderType?: string;
+  unmodifiable?: string;
+  dateAdded?: number;
+  children?: NativeNode[];
+}
+
+interface NativeEvent { addListener(listener: (...args: any[]) => void): void }
+
+/** The parts of chrome.bookmarks / browser.bookmarks that LumaMark uses. */
+export interface NativeBookmarksApi {
+  getTree(): Promise<NativeNode[]>;
+  create(input: { parentId: string; index?: number; title?: string; url?: string }): Promise<NativeNode>;
+  update(id: string, changes: { title?: string; url?: string }): Promise<NativeNode>;
+  move(id: string, destination: { parentId?: string; index?: number }): Promise<NativeNode>;
+  remove(id: string): Promise<void>;
+  removeTree(id: string): Promise<void>;
+  onCreated?: NativeEvent;
+  onRemoved?: NativeEvent;
+  onChanged?: NativeEvent;
+  onMoved?: NativeEvent;
+  onChildrenReordered?: NativeEvent;
+  onImportEnded?: NativeEvent;
+}
+
 export interface WebExtensionApi {
   tabs: ExtensionTabs;
   notifications?: ExtensionNotifications;
@@ -91,6 +122,8 @@ export interface WebExtensionApi {
   storage?: ExtensionStorage;
   i18n?: ExtensionI18n;
   alarms?: ExtensionAlarms;
+  /** Missing on Safari; LumaMark then keeps only its own store. */
+  bookmarks?: NativeBookmarksApi;
 }
 
 export interface SaveActionHandlers {
