@@ -136,6 +136,56 @@ const en = {
   settingsSynced: 'Synced successfully.',
   settingsSyncFailed: 'Sync failed. Local data is still available; retry when ready.',
   settingsConflict: 'A sync conflict needs your choice.',
+  appearance: 'Appearance',
+  theme: 'Theme',
+  themeSystem: 'Match system',
+  themeLight: 'Light',
+  themeDark: 'Dark',
+  bookmarkCount: '{n} bookmarks',
+  bookmarkCountOne: '1 bookmark',
+  justNow: 'just now',
+  minutesAgo: '{n}m ago',
+  hoursAgo: '{n}h ago',
+  daysAgo: '{n}d ago',
+  lastSync: 'Last sync',
+  pending: 'Pending changes',
+  never: 'Never',
+  moved: 'Moved.',
+  close: 'Close',
+  selectedCount: '{n} selected',
+  clearSelection: 'Clear selection',
+  noLocalMatches: 'No bookmarks match. Press Enter to search the web.',
+  searchHint: 'Press / to search',
+  savedHeadline: 'Saved to your bookmarks',
+  saveHint: 'Saved into the browser bookmarks bar and synced with your other browsers.',
+  dropToMove: 'Drop to move into this folder',
+  importTitle: 'Import',
+  exportTitle: 'Export',
+  nativeGroup: 'Browser bookmarks',
+  nativeExplain: 'LumaMark keeps this browser’s own bookmarks (bookmarks bar and other bookmarks) in sync with your other browsers through WebDAV.',
+  nativeToggle: 'Sync this browser’s bookmarks',
+  nativeLinked: '{n} bookmarks and folders linked',
+  nativeUnsupported: 'This browser does not let extensions read its bookmarks. LumaMark keeps its own list here instead.',
+  nativeOff: 'Browser bookmarks are not being synced.',
+  nativeError: 'Some bookmarks could not be updated: {v}',
+  syncCardTitle: 'Bookmark sync',
+  setUpSync: 'Set up WebDAV',
+  syncNotSetUp: 'Connect a WebDAV folder to sync bookmarks between browsers.',
+  syncOkShort: 'Synced {time}',
+  syncPendingShort: '{n} changes waiting',
+  syncErrorShort: 'Sync needs attention',
+  syncConflictShort: 'Choose between two versions',
+  syncWaitingShort: 'Waiting for network',
+  editBookmark: 'Edit bookmark',
+  confirmTitle: 'Are you sure?',
+  keyboardSave: 'Ctrl+Enter',
+  navLabel: 'LumaMark pages',
+  folderActions: 'Folder tools',
+  savedTo: 'Saved to {v}',
+  openPage: 'Open page',
+  nativeOn: 'On — changes here and in your other browsers stay in step.',
+  bookmarksBarShort: 'Bookmarks bar',
+  homeExplain: 'The LumaMark home page (open it from the toolbar card) shows this folder as its bar.',
 };
 
 const zh: { [K in keyof typeof en]: string } = {
@@ -274,6 +324,56 @@ const zh: { [K in keyof typeof en]: string } = {
   settingsSynced: '已同步。',
   settingsSyncFailed: '同步失败。本机数据仍在，可以稍后再试。',
   settingsConflict: '需要选择冲突的版本。',
+  appearance: '外观',
+  theme: '主题',
+  themeSystem: '跟随系统',
+  themeLight: '浅色',
+  themeDark: '深色',
+  bookmarkCount: '{n} 个书签',
+  bookmarkCountOne: '1 个书签',
+  justNow: '刚刚',
+  minutesAgo: '{n} 分钟前',
+  hoursAgo: '{n} 小时前',
+  daysAgo: '{n} 天前',
+  lastSync: '上次同步',
+  pending: '待同步变更',
+  never: '从未',
+  moved: '已移动。',
+  close: '关闭',
+  selectedCount: '已选 {n} 项',
+  clearSelection: '取消选择',
+  noLocalMatches: '没有匹配的书签。按回车在网上搜索。',
+  searchHint: '按 / 搜索',
+  savedHeadline: '已加入书签',
+  saveHint: '已存进浏览器书签栏，并会同步到你的其他浏览器。',
+  dropToMove: '松开以移动到这个文件夹',
+  importTitle: '导入',
+  exportTitle: '导出',
+  nativeGroup: '浏览器书签',
+  nativeExplain: 'LumaMark 会把这台浏览器自带的书签（书签栏和其他书签）通过 WebDAV 与你的其他浏览器保持一致。',
+  nativeToggle: '同步这台浏览器的书签',
+  nativeLinked: '已关联 {n} 个书签和文件夹',
+  nativeUnsupported: '这个浏览器不允许扩展读取书签，LumaMark 会在这里单独保存一份列表。',
+  nativeOff: '没有同步浏览器书签。',
+  nativeError: '有书签没能更新：{v}',
+  syncCardTitle: '书签同步',
+  setUpSync: '设置 WebDAV',
+  syncNotSetUp: '连接一个 WebDAV 文件夹，就能在各个浏览器之间同步书签。',
+  syncOkShort: '{time}已同步',
+  syncPendingShort: '{n} 项待同步',
+  syncErrorShort: '同步需要处理',
+  syncConflictShort: '需要在两个版本中选择',
+  syncWaitingShort: '等待网络',
+  editBookmark: '编辑书签',
+  confirmTitle: '确定吗？',
+  keyboardSave: 'Ctrl+Enter',
+  navLabel: 'LumaMark 页面',
+  folderActions: '文件夹工具',
+  savedTo: '已存到 {v}',
+  openPage: '打开网页',
+  nativeOn: '已开启：这里和其他浏览器的书签改动会保持一致。',
+  bookmarksBarShort: '书签栏',
+  homeExplain: 'LumaMark 首页（从工具栏卡片打开）把这个文件夹显示为书签栏。',
 };
 
 export type Copy = { [K in keyof typeof en]: string };
@@ -298,6 +398,30 @@ export function languageFromApi(api: { i18n?: { getUILanguage?: () => string } }
 
 export function copyFor(language: UiLanguage = 'en'): Copy {
   return catalogs[language];
+}
+
+/** Fill {name} placeholders in a copy string. */
+export function fill(template: string, params: Record<string, string | number>): string {
+  return template.replace(/\{(\w+)\}/g, (match, name: string) => (name in params ? String(params[name]) : match));
+}
+
+export function bookmarkCountLabel(count: number, language: UiLanguage = 'en'): string {
+  const text = copyFor(language);
+  return count === 1 ? text.bookmarkCountOne : fill(text.bookmarkCount, { n: count });
+}
+
+export function relativeTime(iso: string | undefined, language: UiLanguage = 'en', now = Date.now()): string {
+  const text = copyFor(language);
+  const time = iso ? Date.parse(iso) : Number.NaN;
+  if (Number.isNaN(time)) return text.never;
+  const minutes = Math.max(0, Math.floor((now - time) / 60000));
+  if (minutes < 1) return text.justNow;
+  if (minutes < 60) return fill(text.minutesAgo, { n: minutes });
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return fill(text.hoursAgo, { n: hours });
+  const days = Math.floor(hours / 24);
+  if (days < 30) return fill(text.daysAgo, { n: days });
+  return new Date(time).toLocaleDateString(language === 'zh' ? 'zh-CN' : 'en', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 export function notificationCopy(language: UiLanguage = 'en') {

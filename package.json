@@ -7,7 +7,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build": "vite build",
-    "verify": "node scripts/verify.mjs"
+    "verify": "node scripts/verify.mjs",
+    "preview": "node scripts/build-extension.mjs && node scripts/preview.mjs",
+    "icons": "node scripts/generate-icons.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

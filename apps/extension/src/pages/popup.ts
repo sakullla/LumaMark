@@ -32,6 +32,7 @@ export function popupRuntimeMessage(action: RuntimeAction, payload?: unknown): R
     'sync-status': 'lumamark-sync-status', reorder: 'lumamark-reorder', 'set-toolbar': 'lumamark-set-toolbar',
     'get-search-engine': 'lumamark-get-search-engine', 'set-search-engine': 'lumamark-set-search-engine',
     'get-sync-config': 'lumamark-get-sync-config', 'set-auto-sync': 'lumamark-set-auto-sync',
+    'native-status': 'lumamark-native-status', 'set-native-sync': 'lumamark-set-native-sync',
   };
   return { type: runtimeTypes[action], ...(payload === undefined ? {} : { payload }) };
 }
@@ -53,6 +54,14 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
   const savedEditor = root.querySelector<HTMLElement>('#saved-editor');
   const unsavable = root.querySelector<HTMLElement>('#unsavable');
   const undo = root.querySelector<HTMLButtonElement>('#undo');
+  const saveHint = root.querySelector<HTMLElement>('#save-hint');
+  const more = root.querySelector<HTMLElement>('#more');
+  /** The hint and the tags/notes drawer belong to the save button and follow its visibility. */
+  const syncSaveExtras = () => {
+    const hidden = !saveButton || saveButton.hidden;
+    if (saveHint) saveHint.hidden = hidden;
+    if (more) more.hidden = hidden;
+  };
   const setStatus = (value: string) => { if (status) status.textContent = value; };
   let savedId: string | undefined;
   let undoToken: string | undefined;
@@ -96,6 +105,7 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
     if (undo) undo.disabled = false;
     if (saveButton) saveButton.hidden = true;
     if (existingActions) existingActions.hidden = true;
+    syncSaveExtras();
     const titleInput = root.querySelector<HTMLInputElement>('#edit-title');
     if (titleInput) titleInput.value = bookmark.title ?? '';
     await loadFolders(bookmark.collectionId ?? '');
@@ -111,15 +121,28 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
       if (existingActions) existingActions.hidden = !existing;
       if (saveButton) saveButton.hidden = !savable || Boolean(existing);
       if (!existing && savedEditor && !savedId) savedEditor.hidden = true;
-      if (!savable) setStatus(text.cannotSave);
+      syncSaveExtras();
+      if (!savable) setStatus('');
     } catch {
       if (unsavable) unsavable.hidden = false;
       if (saveButton) saveButton.hidden = true;
-      setStatus(text.cannotSave);
+      syncSaveExtras();
+      setStatus('');
     }
   };
 
+  // Ctrl/⌘+Enter saves from anywhere in the card (including the tags and notes fields).
+  root.addEventListener?.('keydown', (event: Event) => {
+    const key = event as KeyboardEvent;
+    if (key.key !== 'Enter' || !(key.ctrlKey || key.metaKey)) return;
+    key.preventDefault();
+    if (saveButton && !saveButton.hidden) saveButton.click();
+    else if (savedEditor && !savedEditor.hidden) root.querySelector<HTMLButtonElement>('#save-edits')?.click();
+  });
+
   saveButton?.addEventListener('click', async () => {
+    if (saveButton.disabled) return;
+    saveButton.disabled = true;
     setStatus(text.saving);
     try {
       const response = await sendRuntime(port, 'save', extras());
@@ -129,14 +152,17 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
       if (outcome?.kind === 'existing') {
         if (existingActions) existingActions.hidden = false;
         if (saveButton) saveButton.hidden = true;
-        setStatus(text.alreadySaved);
+        syncSaveExtras();
+        setStatus('');
         return;
       }
       undoToken = typeof response.undoToken === 'string' ? response.undoToken : undefined;
       await showSaved(outcome?.bookmark ?? {});
-      setStatus(text.saved);
+      setStatus('');
     } catch {
       setStatus(text.notSaved);
+    } finally {
+      saveButton.disabled = false;
     }
   });
 

@@ -1,7 +1,9 @@
 import type { Bookmark, Collection } from '../../../../packages/domain/src/index';
 import {
+  bookmarksInFolder,
   collectionOptions,
   defaultLibraryFilters,
+  folderCounts,
   libraryDocument,
   libraryFailureMessage,
   renderFolderTree,
@@ -9,7 +11,7 @@ import {
   viewClass,
   type LibraryFilters,
 } from '../ui/index';
-import { copyFor, detectUiLanguage } from '../ui/copy';
+import { bookmarkCountLabel, copyFor, detectUiLanguage, fill } from '../ui/copy';
 import { bindIconFallback } from '../ui/icons';
 import { isHttpUrl, nextIndex } from '../ui/bar';
 import { chooseTextFile } from './files';
@@ -50,10 +52,20 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   const status = () => root.querySelector<HTMLElement>('#library-status');
   const selectedIds = () => [...root.querySelectorAll<HTMLInputElement>('[data-select-bookmark]:checked')].map((box) => box.dataset.selectBookmark).filter((id): id is string => Boolean(id));
 
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The status line doubles as a toast; it clears itself after a while. */
+  const say = (message: string, keepFor = 3500) => {
+    const target = status();
+    if (!target) return;
+    target.textContent = message;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { if (target) target.textContent = ''; }, keepFor);
+  };
+
   const showUndo = (message: string, restore: () => Promise<unknown>) => {
     const target = status();
     if (!target) return;
-    target.textContent = `${message} `;
+    say(`${message} `, 8000);
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = text.undo;
@@ -64,12 +76,13 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
         button.disabled = false;
         return;
       }
-      target.textContent = text.restored;
+      say(text.restored);
       await load();
     });
     target.append(button);
   };
 
+  let cancelDecision: (() => void) | undefined;
   const ask = (message: string) => new Promise<boolean>((resolve) => {
     const dialog = root.querySelector<HTMLElement>('#decision');
     const label = root.querySelector<HTMLElement>('#decision-text');
@@ -78,6 +91,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (!dialog || !yes || !no) { resolve(false); return; }
     if (label) label.textContent = message;
     dialog.hidden = false;
+    no.focus?.();
     const finish = (value: boolean) => {
       dialog.hidden = true;
       yes.removeEventListener('click', onYes);
@@ -86,13 +100,30 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     };
     const onYes = () => finish(true);
     const onNo = () => finish(false);
+    cancelDecision = onNo;
     yes.addEventListener('click', onYes);
     no.addEventListener('click', onNo);
   });
 
+  const updateBatch = () => {
+    const batch = root.querySelector<HTMLElement>('#batch-actions');
+    const ids = selectedIds();
+    if (batch) batch.hidden = ids.length === 0;
+    const label = root.querySelector<HTMLElement>('#batch-count');
+    if (label) label.textContent = fill(text.selectedCount, { n: ids.length });
+    root.querySelectorAll<HTMLElement>('.bookmark-card').forEach((card) => {
+      const box = card.querySelector<HTMLInputElement>('[data-select-bookmark]');
+      card.classList?.toggle('is-selected', Boolean(box?.checked));
+    });
+  };
+
   const render = () => {
     const tree = root.querySelector<HTMLElement>('#folder-tree');
-    if (tree) tree.innerHTML = renderFolderTree(collections, folderId, language);
+    if (tree) tree.innerHTML = renderFolderTree(collections, folderId, language, folderCounts(bookmarks));
+    const heading = root.querySelector<HTMLElement>('#folder-heading');
+    if (heading) heading.textContent = folderId === null ? text.unfiled : collections.find((item) => item.id === folderId)?.name ?? text.libraryTitle;
+    const count = root.querySelector<HTMLElement>('#folder-count');
+    if (count) count.textContent = bookmarkCountLabel(bookmarksInFolder(bookmarks, folderId, filters).length, language);
     const options = collectionOptions(collections, '', language);
     const batchSelect = root.querySelector<HTMLSelectElement>('#batch-collection');
     if (batchSelect) batchSelect.innerHTML = `<option value="">${text.chooseFolder}</option>${options}`;
@@ -104,8 +135,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     target.className = viewClass(filters.view);
     target.innerHTML = renderLibraryResults(bookmarks, folderId, filters, language);
     bindIconFallback(target);
-    const batch = root.querySelector<HTMLElement>('#batch-actions');
-    if (batch) batch.hidden = selectedIds().length === 0;
+    updateBatch();
   };
 
   const load = async () => {
@@ -167,6 +197,14 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     folder.innerHTML = `<option value="">${text.topLevel}</option>${collectionOptions(collections, bookmark.collectionId ?? '', language)}`;
     const error = root.querySelector<HTMLElement>('#editor-error');
     if (error) error.textContent = '';
+    const titleField = editor.elements.namedItem('title') as HTMLInputElement;
+    titleField.focus?.();
+    titleField.select?.();
+  };
+  const closeEditor = () => {
+    const editor = root.querySelector<HTMLElement>('#editor');
+    if (editor) editor.hidden = true;
+    editingId = undefined;
   };
 
   root.querySelector<HTMLFormElement>('#editor')?.addEventListener('submit', async (event) => {
@@ -199,17 +237,31 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     editingId = undefined;
     await load();
   });
-  root.querySelector<HTMLButtonElement>('#editor-cancel')?.addEventListener('click', () => {
+  root.querySelector<HTMLButtonElement>('#editor-cancel')?.addEventListener('click', closeEditor);
+
+  // Keyboard: / focuses search, Escape closes the open dialog or clears the search.
+  root.addEventListener('keydown', (event) => {
+    const key = event as KeyboardEvent;
+    const target = key.target as HTMLElement | null;
+    const typing = Boolean(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT'));
+    if (key.key === '/' && !typing && !key.ctrlKey && !key.metaKey) {
+      key.preventDefault();
+      root.querySelector<HTMLInputElement>('#search')?.focus();
+      return;
+    }
+    if (key.key !== 'Escape') return;
+    const decision = root.querySelector<HTMLElement>('#decision');
+    if (decision && !decision.hidden) { cancelDecision?.(); return; }
     const editor = root.querySelector<HTMLElement>('#editor');
-    if (editor) editor.hidden = true;
-    editingId = undefined;
+    if (editor && !editor.hidden) { closeEditor(); return; }
+    const search = root.querySelector<HTMLInputElement>('#search');
+    if (search && target === search && search.value) { search.value = ''; search.form?.dispatchEvent(new Event('input', { bubbles: true })); }
   });
 
   root.addEventListener('change', (event) => {
     const target = event.target as HTMLElement;
     if (!target.matches('[data-select-bookmark]')) return;
-    const batch = root.querySelector<HTMLElement>('#batch-actions');
-    if (batch) batch.hidden = selectedIds().length === 0;
+    updateBatch();
   });
 
   root.addEventListener('click', async (event) => {
@@ -225,7 +277,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (action === 'clear-filters') { form?.reset(); return; }
     if (action === 'save-page') {
       const response = await sendRuntime(port, 'save', {});
-      if (status()) status()!.textContent = response?.unsavable ? text.cannotSave : response?.ok ? text.saved : text.notSaved;
+      say(response?.unsavable ? text.cannotSave : response?.ok ? text.saved : text.notSaved);
       await load();
       return;
     }
@@ -234,7 +286,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
       const content = await chooseTextFile('.html,text/html');
       if (!content) return;
       const response = await sendRuntime(port, 'import', { format: 'html', content, action: rule });
-      if (status()) status()!.textContent = response?.ok ? text.importDone : text.importFailed;
+      say(response?.ok ? text.importDone : text.importFailed);
       await load();
       return;
     }
@@ -289,13 +341,16 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     const ids = selectedIds();
     const collectionId = root.querySelector<HTMLSelectElement>('#batch-collection')?.value ?? '';
     if (!ids.length || !collectionId) return;
-    await sendRuntime(port, 'update', { ids, update: { collectionId } });
+    const response = await sendRuntime(port, 'update', { ids, update: { collectionId } });
+    say(response?.ok === false ? text.notSaved : text.moved);
     await load();
   });
   root.querySelector<HTMLButtonElement>('#create-collection')?.addEventListener('click', async () => {
     const name = root.querySelector<HTMLInputElement>('#new-collection')?.value.trim();
     if (!name) return;
     await sendRuntime(port, 'collection-create', { name });
+    const input = root.querySelector<HTMLInputElement>('#new-collection');
+    if (input) input.value = '';
     await load();
   });
   root.querySelector<HTMLButtonElement>('#delete-folder')?.addEventListener('click', async () => {
