@@ -1,6 +1,7 @@
 import { IndexedDbRepository } from '../../../../packages/storage/src/index';
 import {
   applyBookmarkUpdate,
+  applyCollectionUpdate,
   assignToolbar,
   BookmarkService,
   Collection,
@@ -469,8 +470,13 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
         return { ok: true, page: {}, savable: false, unsavable: true };
       }
     });
-    if (type === 'lumamark-open-library') return accept(async () => { await openExtensionPage('library.html'); return { ok: true }; });
+    if (type === 'lumamark-open-library') return accept(async () => {
+      const target = typeof payload.bookmarkId === 'string' && payload.bookmarkId ? `library.html?bookmark=${encodeURIComponent(payload.bookmarkId)}` : 'library.html';
+      await openExtensionPage(target);
+      return { ok: true };
+    });
     if (type === 'lumamark-open-home') return accept(async () => { await openExtensionPage('home.html'); return { ok: true }; });
+    if (type === 'lumamark-open-settings') return accept(async () => { await openExtensionPage('settings.html'); return { ok: true }; });
     if (type === 'lumamark-open-existing') return accept(async () => {
       const url = typeof payload.url === 'string' && payload.url ? payload.url : lastSavePage?.url;
       if (!url || !isSavablePageUrl(url)) return { ok: false, unsavable: true };
@@ -500,9 +506,20 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
     if (type === 'lumamark-list-collections') return accept(async () => ({ ok: true, items: await repository.listCollections() }));
     if (type === 'lumamark-collection-create') return accept(async () => {
       const now = new Date().toISOString();
-      const collection: Collection = { id: crypto.randomUUID(), name: String(payload.name ?? '').trim() || 'New collection', position: Date.now(), toolbar: false, createdAt: now, updatedAt: now, revision: 1 };
+      const parentId = typeof payload.parentId === 'string' && payload.parentId ? payload.parentId : undefined;
+      const collection: Collection = { id: crypto.randomUUID(), name: String(payload.name ?? '').trim() || 'New collection', parentId, position: Date.now(), toolbar: false, createdAt: now, updatedAt: now, revision: 1 };
       await repository.putCollection(collection);
       return { ok: true, item: collection };
+    });
+    if (type === 'lumamark-collection-update') return accept(async () => {
+      const items = await repository.listCollections();
+      const current = items.find((item) => item.id === payload.id && !item.deletedAt);
+      if (!current) throw new Error('Collection not found');
+      const name = String(payload.name ?? '').trim();
+      if (!name) return { ok: false, error: 'name-required' };
+      const updated = applyCollectionUpdate(current, { name });
+      await repository.putCollection(updated);
+      return { ok: true, item: updated };
     });
     if (type === 'lumamark-collection-delete') return accept(async () => {
       const items = await repository.listCollections();
@@ -535,11 +552,13 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       return { ok: true, item };
     });
     if (type === 'lumamark-update') return accept(async () => {
-      const ids = (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map(String);
-      const update = payload.update ?? {};
+      // Either one change for many ids, or per-item changes (`items`) so a bulk edit and its undo are one message.
+      const changes: Array<{ id: string; update: Record<string, any> }> = Array.isArray(payload.items)
+        ? payload.items.map((item: { id?: unknown; update?: Record<string, any> }) => ({ id: String(item.id ?? ''), update: item.update ?? {} })).filter((item: { id: string }) => item.id)
+        : (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map((id: unknown) => ({ id: String(id), update: payload.update ?? {} }));
       try {
         const items: Bookmark[] = [];
-        for (const id of ids) {
+        for (const { id, update } of changes) {
           const current = await repository.findById(id);
           if (!current) throw new Error('Bookmark not found');
           // http(s) bookmarks stay http(s); bookmarks from the browser (bookmarklets, file: links) keep their kind.
@@ -572,7 +591,12 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       await rememberUndo({ token: undoToken, op: 'restore', ids: items.map((item) => item.id) });
       return { ok: true, items, undoToken };
     });
-    if (type === 'lumamark-restore') return accept(async () => ({ ok: true, item: await service.restore(String(payload.id)) }));
+    if (type === 'lumamark-restore') return accept(async () => {
+      const ids = (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map(String);
+      const items = [];
+      for (const id of ids) items.push(await service.restore(id));
+      return { ok: true, item: items[0], items };
+    });
     if (type === 'lumamark-reorder') return accept(async () => {
       await placeItem(repository, {
         kind: payload.kind === 'folder' ? 'folder' : 'bookmark',

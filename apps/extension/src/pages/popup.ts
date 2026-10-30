@@ -1,8 +1,10 @@
+import type { Collection } from '../../../../packages/domain/src/index';
 import { popupDocument, collectionOptions, type RuntimeAction, type RuntimeMessage } from '../ui/index';
-import { copyFor, detectUiLanguage } from '../ui/copy';
-import { titleInitial } from '../ui/bar';
+import { copyFor, detectUiLanguage, fill } from '../ui/copy';
+import { titleInitial, toolbarFolder } from '../ui/bar';
 import { escapeHtml } from '../ui/html';
 import { bindIconFallback } from '../ui/icons';
+import { folderPaths, parseTags, tagCounts } from '../ui/library-model';
 
 export interface RuntimePort {
   sendMessage(message: RuntimeMessage): Promise<unknown> | unknown;
@@ -33,6 +35,7 @@ export function popupRuntimeMessage(action: RuntimeAction, payload?: unknown): R
     'get-search-engine': 'lumamark-get-search-engine', 'set-search-engine': 'lumamark-set-search-engine',
     'get-sync-config': 'lumamark-get-sync-config', 'set-auto-sync': 'lumamark-set-auto-sync',
     'native-status': 'lumamark-native-status', 'set-native-sync': 'lumamark-set-native-sync',
+    'collection-update': 'lumamark-collection-update', 'open-settings': 'lumamark-open-settings',
   };
   return { type: runtimeTypes[action], ...(payload === undefined ? {} : { payload }) };
 }
@@ -45,7 +48,9 @@ export function popupStatus(kind: 'saving' | 'saved' | 'existing' | 'error' | 'u
   return detail ? `${messages[kind]} ${detail}` : messages[kind];
 }
 
-/** Bind the save card to the background. Tags and notes stay behind More. */
+const TAG_SUGGESTIONS = 6;
+
+/** Bind the save card to the background. The folder is one choice away; tags and notes stay behind More. */
 export function mountPopup(root: ParentNode = document, port: RuntimePort = globalRuntime()): void {
   const text = copyFor(detectUiLanguage());
   const status = root.querySelector<HTMLElement>('#status');
@@ -56,24 +61,28 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
   const undo = root.querySelector<HTMLButtonElement>('#undo');
   const saveHint = root.querySelector<HTMLElement>('#save-hint');
   const more = root.querySelector<HTMLElement>('#more');
-  /** The hint and the tags/notes drawer belong to the save button and follow its visibility. */
+  const folderRow = root.querySelector<HTMLElement>('#save-folder-row');
+  /** The hint, the folder choice and the tags/notes drawer belong to the save button and follow its visibility. */
   const syncSaveExtras = () => {
     const hidden = !saveButton || saveButton.hidden;
     if (saveHint) saveHint.hidden = hidden;
     if (more) more.hidden = hidden;
+    if (folderRow) folderRow.hidden = hidden;
   };
   const setStatus = (value: string) => { if (status) status.textContent = value; };
+  const closePopup = () => { if (typeof window !== 'undefined') window.close(); };
   let savedId: string | undefined;
   let undoToken: string | undefined;
-  let pageUrl = '';
+  let existingId: string | undefined;
+  let collections: Collection[] = [];
 
   const extras = () => ({
-    tags: (root.querySelector<HTMLInputElement>('#save-tags')?.value ?? '').split(',').map((tag) => tag.trim()).filter(Boolean),
+    tags: parseTags(root.querySelector<HTMLInputElement>('#save-tags')?.value ?? ''),
     notes: root.querySelector<HTMLTextAreaElement>('#save-notes')?.value ?? '',
+    collectionId: root.querySelector<HTMLSelectElement>('#save-folder')?.value || undefined,
   });
 
   const showPreview = (page: { url?: string; title?: string; faviconUrl?: string }) => {
-    pageUrl = page.url ?? '';
     const title = root.querySelector<HTMLElement>('#page-title');
     const url = root.querySelector<HTMLElement>('#page-url');
     const icon = root.querySelector<HTMLImageElement>('#page-icon');
@@ -94,10 +103,47 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
     if (!select) return;
     try {
       const response = await sendRuntime(port, 'list-collections');
-      const items = Array.isArray(response?.items) ? response.items : [];
-      select.innerHTML = `<option value="">${escapeHtml(text.topLevel)}</option>${collectionOptions(items, selected, detectUiLanguage())}`;
+      collections = Array.isArray(response?.items) ? response.items : [];
+      select.innerHTML = `<option value="">${escapeHtml(text.topLevel)}</option>${collectionOptions(collections, selected, detectUiLanguage())}`;
     } catch { /* the folder list is optional until the background answers */ }
   };
+
+  /** Folder choice before saving: starts on the bar folder, which is where a plain save lands. */
+  const loadSaveFolders = async () => {
+    const select = root.querySelector<HTMLSelectElement>('#save-folder');
+    if (!select) return;
+    await loadFolders();
+    const initial = toolbarFolder(collections)?.id ?? '';
+    select.innerHTML = `${initial ? '' : `<option value="">${escapeHtml(text.topLevel)}</option>`}${collectionOptions(collections, initial, detectUiLanguage())}`;
+  };
+
+  const addSuggestion = (tag: string) => {
+    const input = root.querySelector<HTMLInputElement>('#save-tags');
+    if (input) input.value = [...parseTags(input.value), tag].join(', ');
+    paintSuggestions();
+  };
+
+  let knownTags: string[] = [];
+  const paintSuggestions = () => {
+    const box = root.querySelector<HTMLElement>('#tag-suggestions');
+    if (!box) return;
+    const used = new Set(parseTags(root.querySelector<HTMLInputElement>('#save-tags')?.value ?? ''));
+    const tags = knownTags.filter((tag) => !used.has(tag)).slice(0, TAG_SUGGESTIONS);
+    box.hidden = !tags.length;
+    box.innerHTML = tags.map((tag) => `<button type="button" class="chip" data-add-tag="${escapeHtml(tag)}">#${escapeHtml(tag)}</button>`).join('');
+  };
+  const loadSuggestions = async () => {
+    try {
+      const response = await sendRuntime(port, 'list', { includeDeleted: false });
+      knownTags = tagCounts(Array.isArray(response?.items) ? response.items : []).map((tag) => tag.name);
+      paintSuggestions();
+    } catch { /* suggestions are optional */ }
+  };
+  root.querySelector<HTMLElement>('#tag-suggestions')?.addEventListener('click', (event) => {
+    const tag = (event.target as HTMLElement).closest<HTMLElement>('[data-add-tag]')?.dataset.addTag;
+    if (tag) addSuggestion(tag);
+  });
+  root.querySelector<HTMLElement>('#save-tags')?.addEventListener('input', paintSuggestions);
 
   const showSaved = async (bookmark: { id?: string; title?: string; collectionId?: string }) => {
     savedId = bookmark.id;
@@ -118,7 +164,14 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
       showPreview(response?.page ?? {});
       if (unsavable) unsavable.hidden = savable;
       const existing = response?.existing;
+      existingId = existing?.id;
       if (existingActions) existingActions.hidden = !existing;
+      if (existing) {
+        await loadFolders();
+        const folder = folderPaths(collections).get(existing.collectionId ?? '');
+        const label = root.querySelector<HTMLElement>('#existing-text');
+        if (label) label.textContent = folder ? fill(text.alreadySavedIn, { v: folder }) : text.alreadySaved;
+      }
       if (saveButton) saveButton.hidden = !savable || Boolean(existing);
       if (!existing && savedEditor && !savedId) savedEditor.hidden = true;
       syncSaveExtras();
@@ -150,6 +203,7 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
       if (!response?.ok) { setStatus(text.notSaved); return; }
       const outcome = response.result;
       if (outcome?.kind === 'existing') {
+        existingId = outcome.existing?.id;
         if (existingActions) existingActions.hidden = false;
         if (saveButton) saveButton.hidden = true;
         syncSaveExtras();
@@ -201,8 +255,10 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
     await refresh();
   });
 
+  // The page is already open behind this card; what the user wants from here is the saved record.
   root.querySelector<HTMLButtonElement>('#open-existing')?.addEventListener('click', () => {
-    void sendRuntime(port, 'open-existing', { url: pageUrl });
+    void sendRuntime(port, 'open-library', existingId ? { bookmarkId: existingId } : undefined);
+    closePopup();
   });
   root.querySelector<HTMLButtonElement>('#update-existing')?.addEventListener('click', async () => {
     const response = await sendRuntime(port, 'update-existing', extras());
@@ -216,12 +272,25 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
   root.querySelector<HTMLAnchorElement>('#open-home')?.addEventListener('click', (event) => {
     event.preventDefault();
     void sendRuntime(port, 'open-home');
+    closePopup();
   });
   root.querySelector<HTMLAnchorElement>('#open-library')?.addEventListener('click', (event) => {
     event.preventDefault();
     void sendRuntime(port, 'open-library');
+    closePopup();
   });
+  root.querySelector<HTMLAnchorElement>('#open-settings')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    void sendRuntime(port, 'open-settings');
+    closePopup();
+  });
+  if (typeof navigator !== 'undefined' && /mac/i.test(navigator.platform ?? '')) {
+    const hint = root.querySelector<HTMLElement>('#save-hint kbd');
+    if (hint) hint.textContent = '⌘ Enter';
+  }
   void refresh();
+  void loadSaveFolders();
+  void loadSuggestions();
 }
 
 export { popupDocument };

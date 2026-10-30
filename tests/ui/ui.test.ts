@@ -75,8 +75,8 @@ describe('LumaMark UI state and documents', () => {
 
   it('collects library filters behind the search row and moves collection tools into the sidebar', () => {
     const library = libraryDocument();
-    expect(library.indexOf('id="search"')).toBeLessThan(library.indexOf('<details id="more-filters">'));
-    expect(library.indexOf('id="folder-tree"')).toBeLessThan(library.indexOf('id="new-collection"'));
+    expect(library.indexOf('id="search"')).toBeLessThan(library.indexOf('<details id="more-filters"'));
+    expect(library.indexOf('id="folder-tree"')).toBeLessThan(library.indexOf('id="filters"'));
     expect(library.indexOf('id="new-collection"')).toBeLessThan(library.indexOf('id="filters"'));
     expect(library).toContain('id="batch-actions" hidden');
     expect(library).toContain('id="batch-move" class="secondary"');

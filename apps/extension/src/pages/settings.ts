@@ -1,6 +1,7 @@
 import { collectionOptions, renderConflicts, settingsDocument } from '../ui/index';
 import { classifyFailure } from '../ui/bar';
 import { copyFor, detectUiLanguage, fill, probeSentence, relativeTime, type UiLanguage } from '../ui/copy';
+import { readPreferences, savePreference, type AccentChoice, type ThemeChoice } from '../ui/theme';
 import { chooseTextFile } from './files';
 import { sendRuntime, type RuntimePort } from './popup';
 
@@ -56,6 +57,12 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
     if (metadata?.status === 'offline') { setSummary('pending', text.syncWaitingShort); return; }
     if (metadata?.pendingChanges) { setSummary('pending', fill(text.syncPendingShort, { n: metadata.pendingChanges })); return; }
     setSummary('ok', metadata?.lastSyncAt ? fill(text.syncOkShort, { time: relativeTime(metadata.lastSyncAt, language) }) : text.syncAligned);
+  };
+
+  /** Nothing to sync with until a WebDAV address is saved. */
+  const paintSyncControls = () => {
+    const syncNow = root.querySelector<HTMLButtonElement>('#sync-now');
+    if (syncNow) syncNow.hidden = !configured;
   };
 
   const nativeToggle = root.querySelector<HTMLInputElement>('#native-sync');
@@ -131,8 +138,12 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
       configured = Boolean(config.url);
       if (path) path.value = config.path ?? '';
       if (username) username.value = config.username ?? '';
-      if (passwordInput) passwordInput.value = '';
+      if (passwordInput) {
+        passwordInput.value = '';
+        passwordInput.placeholder = config.url ? text.passwordKept : '';
+      }
       if (autoSync) autoSync.checked = Boolean(config.autoSync);
+      paintSyncControls();
       if (search && typeof engineResponse?.url === 'string') search.value = engineResponse.url;
       const folders = root.querySelector<HTMLSelectElement>('#toolbar-folder');
       const items = Array.isArray(collectionsResponse?.items) ? collectionsResponse.items : [];
@@ -161,6 +172,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
       else if (kind === 'empty') setSync(text.syncLocal);
       else setSync(probeSentence(kind, language));
       if (response?.ok) configured = true;
+      paintSyncControls();
       await loadConflicts();
     } catch {
       if (passwordInput) passwordInput.value = '';
@@ -188,6 +200,12 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
       setSync(statusText('error'));
     }
   });
+
+  root.querySelectorAll<HTMLButtonElement>('[data-search-preset]').forEach((button) => button.addEventListener('click', () => {
+    const search = root.querySelector<HTMLInputElement>('#search-url');
+    if (search) search.value = button.dataset.searchPreset ?? '';
+    root.querySelector<HTMLButtonElement>('#save-search')?.click();
+  }));
 
   root.querySelector<HTMLButtonElement>('#save-toolbar')?.addEventListener('click', async () => {
     const id = root.querySelector<HTMLSelectElement>('#toolbar-folder')?.value ?? '';
@@ -231,6 +249,31 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
       if (dataStatus) dataStatus.textContent = text.exportFailed;
     }
   });
+
+  // Appearance applies the moment it is chosen; there is nothing to save.
+  const preferences = readPreferences();
+  root.querySelectorAll<HTMLInputElement>('input[name="theme"], input[name="accent"]').forEach((input) => {
+    input.checked = input.value === preferences[input.name as 'theme' | 'accent'];
+    input.addEventListener('change', () => {
+      if (input.name === 'theme') savePreference('theme', input.value as ThemeChoice);
+      else savePreference('accent', input.value as AccentChoice);
+    });
+  });
+
+  // Highlight the section being read in the side navigation.
+  const links = [...root.querySelectorAll<HTMLElement>('[data-section-link]')];
+  const markSection = (id: string) => links.forEach((link) => {
+    if (link.dataset.sectionLink === id) link.setAttribute('aria-current', 'true');
+    else link.removeAttribute('aria-current');
+  });
+  if (links[0]?.dataset.sectionLink) markSection(links[0].dataset.sectionLink);
+  if (typeof IntersectionObserver !== 'undefined') {
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries.filter((item) => item.isIntersecting).sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
+      if (entry) markSection(entry.target.id);
+    }, { rootMargin: '-15% 0px -65% 0px' });
+    root.querySelectorAll('.settings-card').forEach((card) => observer.observe(card));
+  }
 
   void loadForm().then(loadConflicts);
   void loadNative();

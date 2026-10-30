@@ -5,7 +5,8 @@
  *
  *   npm run preview
  *   open http://localhost:4178/home.html   (library.html, popup.html, settings.html)
- *   query: ?theme=dark|light  ?lang=zh|en  ?reset=1  ?tab=<url of the "active tab">
+ *   query: ?theme=dark|light  ?accent=ember  ?lang=zh|en  ?reset=1  ?tab=<url of the "active tab">
+ *          ?bulk=10000 (with reset: seed that many extra bookmarks to check large libraries)
  */
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -23,7 +24,9 @@ import { IndexedDbRepository } from './packages/storage/src/index';
 import { makeBookmark } from './packages/domain/src/index';
 
 const params = new URLSearchParams(location.search);
+const bulk = Number(params.get('bulk') ?? 0);
 if (params.get('theme')) localStorage.setItem('lumamark-theme', params.get('theme'));
+if (params.get('accent')) localStorage.setItem('lumamark-accent', params.get('accent'));
 if (params.get('lang')) {
   const language = params.get('lang') === 'zh' ? 'zh-CN' : 'en-US';
   Object.defineProperty(navigator, 'language', { value: language, configurable: true });
@@ -100,6 +103,14 @@ async function seed() {
   ];
   for (const [index, [url, title, collectionId, tags, notes, favorite, age]] of rows.entries()) {
     await repository.put(makeBookmark({ url, title, collectionId, tags, notes, favorite, position: index }, new Date(now - age * day).toISOString()));
+  }
+  // A duplicate and a trashed bookmark, so those views have something to show.
+  await repository.put(makeBookmark({ url: 'https://github.com/', title: 'GitHub (old copy)', collectionId: 'tools', position: 90 }, new Date(now - 60 * day).toISOString()));
+  await repository.put({ ...makeBookmark({ url: 'https://example.com/retired', title: 'Retired project notes', position: 91 }, new Date(now - 70 * day).toISOString()), deletedAt: new Date(now - 2 * day).toISOString() });
+  const sections = folders.map(([id]) => id);
+  const words = ['Guide', 'Reference', 'Notes', 'Release', 'Handbook', 'Tutorial', 'Patterns', 'Overview'];
+  for (let index = 0; index < bulk; index += 1) {
+    await repository.put(makeBookmark({ url: \`https://site\${index % 400}.example/page/\${index}\`, title: \`\${words[index % words.length]} \${index} | Site \${index % 400}\`, collectionId: sections[index % sections.length], tags: [\`topic-\${index % 25}\`], position: 100 + index }, new Date(now - (index % 300) * day).toISOString()));
   }
 }
 
