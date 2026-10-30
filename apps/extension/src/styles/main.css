@@ -202,6 +202,8 @@ details[open] > *:not(summary) { margin: var(--space-1) var(--space-3) var(--spa
 #search-results a { display: flex; align-items: center; gap: var(--space-2); min-height: 2.5rem; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); color: inherit; }
 #sync-line { color: var(--muted); font-size: var(--text-sm); }
 #sync-line a { color: inherit; }
+.sync-dot { display: inline-block; width: .55em; height: .55em; border-radius: var(--radius-full); background: var(--muted); }
+.sync-dot.danger { background: var(--danger); }
 #search-note { font-size: var(--text-sm); color: var(--muted); }
 
 /* ── 书签栏 ── */
@@ -264,7 +266,7 @@ details[open] > *:not(summary) { margin: var(--space-1) var(--space-3) var(--spa
 .empty-state h2 { font-size: var(--text-md); color: var(--text); }
 .empty-state p, .loading-state p { font-size: var(--text-sm); }
 .empty-icon { font-size: 1.75rem; line-height: 1; color: var(--muted); }
-.empty-state .button-row { justify-content: center; }
+.empty-state .button-row, .empty-state .empty-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: center; }
 
 /* ── 状态条（role=status 行）语义化 ── */
 p[role="status"], .form-note { font-size: var(--text-sm); color: var(--muted); min-height: 1.2em; }

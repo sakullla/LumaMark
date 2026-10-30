@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeBookmark, type Collection } from '../../packages/domain/src/index';
-import { defaultLibraryFilters, filterBookmarks, libraryDocument, popupDocument, renderBookmarkCard, renderEmptyState, settingsDocument, toBookmarkQuery } from '../../apps/extension/src/ui/index';
+import { defaultLibraryFilters, filterBookmarks, homeDocument, libraryDocument, popupDocument, renderBookmarkCard, renderEmptyState, settingsDocument, toBookmarkQuery } from '../../apps/extension/src/ui/index';
 import { popupRuntimeMessage, popupStatus } from '../../apps/extension/src/pages/popup';
 import { settingsStatusMessage } from '../../apps/extension/src/pages/settings';
 
@@ -42,6 +42,69 @@ describe('LumaMark UI state and documents', () => {
     expect(popupDocument()).toContain('aria-live');
     expect(libraryDocument([collection])).toContain('Search title, URL, tags, or notes');
     expect(settingsDocument()).toContain('WebDAV URL');
+  });
+
+  it('grades popup actions and keeps every mount hook after the reshuffle', () => {
+    const popup = popupDocument();
+    expect(popup).toContain('<details id="more">');
+    expect(popup).toContain('id="saved-editor" class="form-grid"');
+    expect(popup).toContain('id="save-edits" class="primary"');
+    expect(popup).toContain('id="delete-saved" class="danger"');
+    expect(popup).toContain('id="undo" class="ghost"');
+    expect(popup).toContain('id="open-existing" class="secondary"');
+    expect(popup).toContain('id="update-existing" class="primary"');
+    expect(popup).toContain('id="copy-existing" class="ghost"');
+    expect(popup).toContain('id="save" class="primary"');
+    for (const hook of ['id="page-preview"', 'id="page-icon"', 'id="page-fallback"', 'id="page-title"', 'id="page-url"', 'id="save-tags"', 'id="save-notes"', 'id="edit-title"', 'id="edit-folder"', 'id="existing-note"', 'id="status"', 'id="open-home"', 'id="open-library"']) {
+      expect(popup).toContain(hook);
+    }
+    expect(popup).toContain('<svg');
+  });
+
+  it('gives the home search hero and empty bar a layered structure', () => {
+    const home = homeDocument();
+    expect(home).toContain('id="search-form" role="search"');
+    expect(home).toContain('id="search" type="search"');
+    expect(home).toContain('class="empty-icon"');
+    expect(home).toContain('id="save-current" class="primary"');
+    expect(home).toContain('id="import-html" class="secondary"');
+    expect(home).toContain('id="bar-empty" class="empty-state" hidden');
+    expect(home).toContain('id="sync-line"');
+    expect(home).toContain('<svg');
+  });
+
+  it('collects library filters behind the search row and moves collection tools into the sidebar', () => {
+    const library = libraryDocument();
+    expect(library.indexOf('id="search"')).toBeLessThan(library.indexOf('<details id="more-filters">'));
+    expect(library.indexOf('id="folder-tree"')).toBeLessThan(library.indexOf('id="new-collection"'));
+    expect(library.indexOf('id="new-collection"')).toBeLessThan(library.indexOf('id="filters"'));
+    expect(library).toContain('id="batch-actions" hidden');
+    expect(library).toContain('id="batch-move" class="secondary"');
+    expect(library).toContain('id="batch-delete" class="danger"');
+    expect(library).toContain('id="create-collection" class="secondary"');
+    expect(library).toContain('id="delete-folder" class="danger"');
+    expect(library).toContain('id="editor" class="form-grid"');
+    expect(library).toContain('id="decision-confirm" class="danger"');
+    expect(library).toContain('id="decision-cancel" class="secondary"');
+    for (const name of ['name="text"', 'name="tag"', 'name="domain"', 'name="from"', 'name="to"', 'name="favoriteOnly"', 'name="title"', 'name="url"', 'name="folder"', 'name="tags"', 'name="notes"', 'name="favorite"']) {
+      expect(library).toContain(name);
+    }
+    for (const id of ['id="tag"', 'id="domain"', 'id="from"', 'id="to"', 'id="favorite"', 'id="batch-collection"', 'id="results"', 'id="editor-title"', 'id="editor-url"', 'id="editor-folder"', 'id="editor-tags"', 'id="editor-notes"', 'id="editor-favorite"', 'id="editor-error"', 'id="editor-cancel"', 'id="decision"', 'id="decision-text"', 'id="library-status"', 'id="new-collection"']) {
+      expect(library).toContain(id);
+    }
+  });
+
+  it('cards the settings groups with aligned grids and graded action rows', () => {
+    const settings = settingsDocument();
+    expect(settings).toContain('id="sync-form" class="form-grid"');
+    expect(settings).toContain('id="sync-now" class="secondary"');
+    expect(settings).toContain('id="export" class="secondary"');
+    expect(settings).toContain('id="save-toolbar" class="primary"');
+    expect(settings).toContain('id="import-html" class="secondary"');
+    expect(settings).toContain('class="check-line"');
+    for (const id of ['id="toolbar-folder"', 'id="save-toolbar"', 'id="search-url"', 'id="save-search"', 'id="home-status"', 'id="webdav-url"', 'id="webdav-path"', 'id="webdav-user"', 'id="webdav-password"', 'id="auto-sync"', 'id="sync-status"', 'id="sync-metadata"', 'id="conflicts"', 'id="import-action"', 'id="import-html"', 'id="import-json"', 'id="export"', 'id="data-status"']) {
+      expect(settings).toContain(id);
+    }
   });
 
   it('exposes runtime actions and clear status for save, duplicate, undo and errors', () => {
