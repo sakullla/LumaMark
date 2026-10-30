@@ -215,7 +215,7 @@ export function popupDocument(language: UiLanguage = 'en'): string {
 export function libraryDocument(collections: Collection[] = [], language: UiLanguage = 'en'): string {
   const text = copyFor(language);
   return pageShell(language, 'LumaMark', `<main class="library-shell"><header class="page-header"><p class="brand">LumaMark</p><h1>${escapeHtml(text.libraryTitle)}</h1></header><div class="library-layout">` +
-    `<aside class="library-side library-main">` +
+    `<aside class="library-side">` +
     `<nav id="folder-tree" aria-label="${escapeHtml(text.folders)}">${renderFolderTree(collections, null, language)}</nav>` +
     `<section class="collection-tools" aria-label="${escapeHtml(text.folders)}"><input id="new-collection" type="text" placeholder="${escapeHtml(text.newFolder)}"><div class="button-row"><button type="button" id="create-collection" class="secondary">${escapeHtml(text.createFolder)}</button><button type="button" id="delete-folder" class="danger">${escapeHtml(text.deleteFolder)}</button></div></section>` +
     `</aside>` +
