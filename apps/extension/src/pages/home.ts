@@ -1,10 +1,11 @@
-import type { Bookmark, Collection } from '../../../../packages/domain/src/index';
-import { homeDocument, renderSyncLine, searchBookmarks } from '../ui/index';
+import { isSeparator, type Bookmark, type Collection } from '../../../../packages/domain/src/index';
+import { folderCounts, homeDocument, renderSyncLine, searchBookmarks, siteIcon } from '../ui/index';
 import {
   barDropParent,
   barItemBudget,
   buildBar,
   dropIntent,
+  folderTree,
   hasDisplayableBookmarks,
   homeSyncPhrase,
   isHttpUrl,
@@ -15,9 +16,9 @@ import {
   visibleItemCount,
   type BarModel,
 } from '../ui/bar';
-import { copyFor, detectUiLanguage } from '../ui/copy';
+import { copyFor, detectUiLanguage, fill, relativeTime } from '../ui/copy';
 import { escapeHtml } from '../ui/html';
-import { bindIconFallback, overflowIcon } from '../ui/icons';
+import { bindIconFallback, overflowIcon, uiIcon } from '../ui/icons';
 import { chooseTextFile } from './files';
 import { sendRuntime, type RuntimePort } from './popup';
 
@@ -29,6 +30,11 @@ function globalRuntime(): RuntimePort {
 }
 
 type PageRoot = ParentNode & EventTarget;
+
+const MAX_RESULTS = 8;
+const MAX_FAVORITES = 12;
+const MAX_RECENT = 6;
+const MAX_FOLDERS = 8;
 
 function px(value: string | undefined): number {
   const parsed = Number.parseFloat(value ?? '');
@@ -510,36 +516,41 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
   });
 
   const searchInput = () => root.querySelector<HTMLInputElement>('#search');
+  let activeResult = -1;
+
+  const resultOptions = () => [...(results()?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])];
+
+  const markResult = (index: number) => {
+    activeResult = index;
+    const input = searchInput();
+    resultOptions().forEach((option, position) => {
+      option.setAttribute('aria-selected', String(position === index));
+      if (position === index) {
+        input?.setAttribute('aria-activedescendant', option.id);
+        option.scrollIntoView?.({ block: 'nearest' });
+      }
+    });
+    if (index < 0) input?.removeAttribute('aria-activedescendant');
+  };
+
   const paintSearch = () => {
     const input = searchInput();
     const list = results();
     if (!input || !list) return;
-    const matches = searchBookmarks(bookmarks, input.value);
-    list.innerHTML = matches.map((bookmark) => `<li role="option"><a${isHttpUrl(bookmark.url) ? ` href="${escapeHtml(bookmark.url)}"` : ''}>${escapeHtml(bookmark.title)}</a></li>`).join('');
+    const query = input.value.trim();
+    const matches = searchBookmarks(bookmarks, input.value).slice(0, MAX_RESULTS);
+    const rows = matches.map((bookmark, index) => `<li role="option" id="result-${index}" aria-selected="false"><a${isHttpUrl(bookmark.url) ? ` href="${escapeHtml(bookmark.url)}"` : ''}>` +
+      `${siteIcon(bookmark.url, bookmark.title, bookmark.domain, bookmark.faviconUrl)}<span class="result-title">${escapeHtml(bookmark.title)}</span><span class="result-domain">${escapeHtml(bookmark.domain)}</span></a></li>`);
+    const web = query ? `<li role="option" id="result-web" aria-selected="false" class="result-web"><a href="#" data-web-search>${uiIcon('arrowRight')}<span class="result-title">${escapeHtml(fill(text.webSearchFor, { v: query }))}</span><kbd>Enter</kbd></a></li>` : '';
+    list.innerHTML = rows.join('') + web;
+    list.hidden = !query;
+    input.setAttribute('aria-expanded', String(Boolean(query)));
+    activeResult = -1;
+    input.removeAttribute('aria-activedescendant');
+    bindIconFallback(list);
   };
-  searchInput()?.addEventListener('input', () => {
-    paintSearch();
-    if (note()) note()!.textContent = '';
-  });
-  searchInput()?.addEventListener('keydown', (event) => {
-    const links = [...(results()?.querySelectorAll<HTMLAnchorElement>('a') ?? [])];
-    if (event.key === 'ArrowDown' && links.length) {
-      event.preventDefault();
-      links[0].focus();
-      return;
-    }
-    if (event.key === 'Enter' && links.length && event.altKey) links[0].click();
-  });
-  results()?.addEventListener('keydown', (event) => {
-    const links = [...(results()?.querySelectorAll<HTMLAnchorElement>('a') ?? [])];
-    const current = links.findIndex((link) => link === document.activeElement);
-    const next = nextIndex(current < 0 ? 0 : current, links.length, event.key);
-    if (next === undefined) return;
-    event.preventDefault();
-    links[next]?.focus();
-  });
-  root.querySelector<HTMLFormElement>('#search-form')?.addEventListener('submit', (event) => {
-    event.preventDefault();
+
+  const runWebSearch = () => {
     const query = searchInput()?.value.trim() ?? '';
     if (!query) return;
     const online = typeof navigator === 'undefined' ? true : navigator.onLine !== false;
@@ -549,6 +560,52 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
       return;
     }
     if (typeof location !== 'undefined') location.assign(plan.url);
+  };
+
+  searchInput()?.addEventListener('input', () => {
+    paintSearch();
+    if (note()) note()!.textContent = '';
+  });
+  searchInput()?.addEventListener('keydown', (event) => {
+    const options = resultOptions();
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (!options.length) return;
+      event.preventDefault();
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      markResult(activeResult < 0 && step < 0 ? options.length - 1 : (activeResult + step + options.length) % options.length);
+      return;
+    }
+    if (event.key === 'Escape') {
+      const input = searchInput();
+      if (input?.value) { input.value = ''; paintSearch(); }
+      return;
+    }
+    if (event.key === 'Enter' && event.altKey && options.length > 1) {
+      event.preventDefault();
+      options[0].querySelector('a')?.click();
+      return;
+    }
+    if (event.key === 'Enter' && activeResult >= 0) {
+      event.preventDefault();
+      options[activeResult]?.querySelector('a')?.click();
+    }
+  });
+  results()?.addEventListener('click', (event) => {
+    if (!(event.target as HTMLElement).closest('[data-web-search]')) return;
+    event.preventDefault();
+    runWebSearch();
+  });
+  // Anywhere on the page, / jumps to search, as it does in the library.
+  root.addEventListener('keydown', (event) => {
+    const key = event as KeyboardEvent;
+    const target = key.target as HTMLElement | null;
+    if (key.key !== '/' || key.ctrlKey || key.metaKey || (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+    key.preventDefault();
+    searchInput()?.focus();
+  });
+  root.querySelector<HTMLFormElement>('#search-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    runWebSearch();
   });
 
   root.querySelector<HTMLButtonElement>('#save-current')?.addEventListener('click', async () => {
@@ -564,6 +621,30 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     if (note()) note()!.textContent = response?.ok ? text.importDone : text.importFailed;
     if (response?.ok) await load();
   });
+
+  const fillSection = (id: string, html: string) => {
+    const section = root.querySelector<HTMLElement>(`#${id}`);
+    const body = section?.querySelector<HTMLElement>('.home-section-body');
+    if (!section || !body) return;
+    section.hidden = !html;
+    body.innerHTML = html;
+    bindIconFallback(body);
+  };
+
+  /** What a person came back for: favorites, what they just saved, and the way into their folders. */
+  const paintSections = () => {
+    const live = bookmarks.filter((bookmark) => !bookmark.deletedAt && !isSeparator(bookmark));
+    const open = (bookmark: Bookmark) => (isHttpUrl(bookmark.url) ? ` href="${escapeHtml(bookmark.url)}"` : '');
+    fillSection('home-favorites', live.filter((bookmark) => bookmark.favorite).slice(0, MAX_FAVORITES).map((bookmark) =>
+      `<a class="home-tile"${open(bookmark)} title="${escapeHtml(bookmark.title)}">${siteIcon(bookmark.url, bookmark.title, bookmark.domain, bookmark.faviconUrl)}<span>${escapeHtml(bookmark.title)}</span></a>`).join(''));
+    const recent = [...live].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, MAX_RECENT);
+    fillSection('home-recent', recent.map((bookmark) =>
+      `<a class="home-row"${open(bookmark)}>${siteIcon(bookmark.url, bookmark.title, bookmark.domain, bookmark.faviconUrl)}<span class="home-row-text"><span class="home-row-title">${escapeHtml(bookmark.title)}</span><span class="home-row-meta">${escapeHtml(bookmark.domain)}</span></span><time>${escapeHtml(relativeTime(bookmark.createdAt, language))}</time></a>`).join(''));
+    const counts = folderCounts(bookmarks);
+    const folders = live.length ? folderTree(collections).flatMap((node) => (node.toolbar ? node.children : [node])).slice(0, MAX_FOLDERS) : [];
+    fillSection('home-folders', folders.map((folder) =>
+      `<a class="home-folder" href="library.html?folder=${encodeURIComponent(folder.id)}">${uiIcon('folder')}<span>${escapeHtml(folder.name)}</span><span class="home-count">${counts[folder.id] ?? 0}</span></a>`).join(''));
+  };
 
   const load = async () => {
     const [listed, folderResponse, engine, config, metadata] = await Promise.all([
@@ -585,6 +666,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     const syncLine = root.querySelector<HTMLElement>('#sync-line');
     if (syncLine) syncLine.innerHTML = renderSyncLine(phrase, language);
     render();
+    paintSections();
     paintSearch();
   };
 

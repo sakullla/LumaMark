@@ -408,7 +408,7 @@ describe('bookmark bar full titles', () => {
 
   it('places the full title outside the clipped bar on hover and keyboard focus', async () => {
     const css = readFileSync('apps/extension/src/styles/main.css', 'utf8');
-    expect(css).toContain('.bookmark-bar { gap: 4px; overflow: hidden;');
+    expect(css).toContain('.bookmark-bar { gap: 2px; overflow: hidden;');
     expect(css).toContain('.bar-items { flex: 1; overflow: hidden;');
     expect(css).not.toContain('overflow-y: visible');
 

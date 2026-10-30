@@ -133,8 +133,8 @@ describe('bookmark bar and shared surfaces', () => {
     expect(popupDocument()).not.toMatch(/autofocus/i);
     expect(library).toContain('Search title, URL, tags, or notes');
     expect(library).toContain('id="batch-actions" hidden');
-    expect(library).toContain('<details id="more-filters">');
-    expect(library).not.toContain('<details id="more-filters" open');
+    expect(library).toContain('<details id="more-filters" class="menu">');
+    expect(library).not.toMatch(/<details id="more-filters"[^>]* open/);
     expect(settings).toContain('WebDAV URL');
     expect(settings).toContain('other desktop browsers get the same bookmarks');
     expect(settings).toContain('type="password"');

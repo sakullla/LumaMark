@@ -122,6 +122,51 @@ describe('browser adapter', () => {
     await vi.waitFor(() => expect(response).toEqual({ ok: true, items: [] }));
   });
 
+  it('applies bulk edits, bulk restores, folder renames and deep links from the library', async () => {
+    type RuntimeMessageListener = (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void;
+    const repository = new IndexedDbRepository(`lumamark-bulk-${crypto.randomUUID()}`);
+    let listener: RuntimeMessageListener | undefined;
+    const api = {
+      tabs: { query: vi.fn().mockResolvedValue([]), create: vi.fn().mockResolvedValue(undefined) },
+      runtime: { getURL: (path: string) => `ext://${path}`, onMessage: { addListener: (callback: RuntimeMessageListener) => { listener = callback; } } },
+    };
+    startBackground(api, repository);
+    const send = (type: string, payload?: unknown) => new Promise<any>((resolve) => { listener?.({ type, payload }, {}, resolve); });
+    const first = makeBookmark({ url: 'https://one.example/', title: 'One', tags: ['a'] });
+    const second = makeBookmark({ url: 'https://two.example/', title: 'Two' });
+    await repository.put(first);
+    await repository.put(second);
+
+    const edited = await send('lumamark-update', { items: [
+      { id: first.id, update: { tags: ['a', 'b'], url: 'https://moved.example/' } },
+      { id: second.id, update: { title: 'Second' } },
+    ] });
+    expect(edited.ok).toBe(true);
+    expect(await repository.findById(first.id)).toMatchObject({ tags: ['a', 'b'], url: 'https://moved.example/', domain: 'moved.example', title: 'One' });
+    expect(await repository.findById(second.id)).toMatchObject({ title: 'Second', tags: [] });
+    expect((await send('lumamark-update', { items: [{ id: first.id, update: { url: 'javascript:void(0)' } }] })).error).toBe('invalid-url');
+
+    await send('lumamark-delete', { ids: [first.id, second.id] });
+    const restored = await send('lumamark-restore', { ids: [first.id, second.id] });
+    expect(restored.items).toHaveLength(2);
+    expect((await repository.findById(first.id))?.deletedAt).toBeUndefined();
+    expect((await send('lumamark-restore', { id: second.id })).item.id).toBe(second.id);
+
+    const parent = (await send('lumamark-collection-create', { name: 'Parent' })).item;
+    const child = (await send('lumamark-collection-create', { name: 'Child', parentId: parent.id })).item;
+    expect(child.parentId).toBe(parent.id);
+    const renamed = await send('lumamark-collection-update', { id: parent.id, name: '  Renamed  ' });
+    expect(renamed.item).toMatchObject({ name: 'Renamed', revision: parent.revision + 1 });
+    expect((await send('lumamark-collection-update', { id: parent.id, name: '   ' })).ok).toBe(false);
+
+    await send('lumamark-open-library', { bookmarkId: 'a b' });
+    expect(api.tabs.create).toHaveBeenLastCalledWith({ url: 'ext://library.html?bookmark=a%20b' });
+    await send('lumamark-open-library');
+    expect(api.tabs.create).toHaveBeenLastCalledWith({ url: 'ext://library.html' });
+    await send('lumamark-open-settings');
+    expect(api.tabs.create).toHaveBeenLastCalledWith({ url: 'ext://settings.html' });
+  });
+
   it('uses current page metadata for existing bookmark update and copy actions', async () => {
     type RuntimeMessageListener = (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void;
     const repository = new IndexedDbRepository(`lumamark-metadata-${crypto.randomUUID()}`);

@@ -8,7 +8,7 @@ const out = resolve(root, 'dist/extension');
 await rm(out, { recursive: true, force: true });
 await mkdir(out, { recursive: true });
 
-const htmlShell = (title, script) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title></head><body><script src="${script}"></script></body></html>`;
+const htmlShell = (title, script) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="color-scheme" content="light dark"><title>${title}</title></head><body><script src="${script}"></script></body></html>`;
 
 async function bundleEntry(contents, outfile) {
   await build({
@@ -47,8 +47,8 @@ for (const target of ['chrome', 'firefox', 'safari']) {
     ? resolve(root, 'apps/extension/manifest.chrome.json')
     : resolve(root, `apps/extension/manifest.${target}.json`);
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  // Safari Web Extensions have no bookmarks API; LumaMark keeps its own list there.
-  if (target === 'safari') manifest.permissions = manifest.permissions.filter((permission) => permission !== 'bookmarks');
+  // Safari Web Extensions have no bookmarks API or local favicon cache; LumaMark keeps its own list there.
+  if (target === 'safari') manifest.permissions = manifest.permissions.filter((permission) => permission !== 'bookmarks' && permission !== 'favicon');
   await writeFile(resolve(targetDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await cp(resolve(root, 'apps/extension/src/assets'), resolve(targetDir, 'assets'), { recursive: true });
 
@@ -59,10 +59,13 @@ for (const target of ['chrome', 'firefox', 'safari']) {
     const entry = `
       import { ${page.documentExport}, ${page.mount} } from '${page.module}';
       import { detectUiLanguage } from './apps/extension/src/ui/copy.ts';
+      import { applyPreferences, watchPreferences } from './apps/extension/src/ui/theme.ts';
       import css from './apps/extension/src/styles/main.css';
       const start = () => {
         const language = detectUiLanguage();
         document.documentElement.lang = language === 'zh' ? 'zh' : 'en';
+        applyPreferences();
+        watchPreferences();
         const style = document.createElement('style');
         style.textContent = css;
         document.head.append(style);

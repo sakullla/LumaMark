@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Local-first cross-browser bookmarks",
   "icons": { "16": "assets/icons/icon-16.png", "32": "assets/icons/icon-32.png", "48": "assets/icons/icon-48.png", "128": "assets/icons/icon-128.png" },
-  "permissions": ["storage", "contextMenus", "commands", "notifications", "tabs", "alarms", "bookmarks"],
+  "permissions": ["storage", "contextMenus", "commands", "notifications", "tabs", "alarms", "bookmarks", "favicon"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "Save to LumaMark", "default_popup": "popup.html", "default_icon": { "16": "assets/icons/icon-16.png", "32": "assets/icons/icon-32.png", "48": "assets/icons/icon-48.png" } },

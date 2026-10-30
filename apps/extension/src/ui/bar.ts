@@ -8,7 +8,7 @@ import {
   sortByPosition,
 } from '../../../../packages/domain/src/index';
 import { escapeHtml } from './html';
-import { folderIcon } from './icons';
+import { faviconSource, folderIcon } from './icons';
 
 export const DEFAULT_SEARCH_URL = 'https://www.google.com/search?q={query}';
 
@@ -204,10 +204,21 @@ export function folderTree(collections: readonly Collection[]): FolderNode[] {
   return walk(undefined);
 }
 
-function iconMarkup(title: string, faviconUrl?: string): string {
+/** Stable hue per site so letter tiles are easy to tell apart. */
+export function tileHue(seed: string): number {
+  let hash = 0;
+  for (let index = 0; index < seed.length; index += 1) hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  return hash % 360;
+}
+
+function iconMarkup(title: string, faviconUrl?: string, url = ''): string {
   const initial = escapeHtml(titleInitial(title));
-  if (!faviconUrl) return `<span class="item-fallback" aria-hidden="true">${initial}</span>`;
-  return `<span class="item-icon"><img src="${escapeHtml(faviconUrl)}" alt="" data-initial="${initial}"><span class="item-fallback" hidden>${initial}</span></span>`;
+  const source = faviconSource(url, faviconUrl, 16);
+  let host = url;
+  try { host = new URL(url).hostname; } catch { /* a bookmarklet has no host */ }
+  const tile = `style="--tile-hue:${tileHue(host || title)}"`;
+  if (!source) return `<span class="item-fallback" ${tile} aria-hidden="true">${initial}</span>`;
+  return `<span class="item-icon"><img src="${escapeHtml(source)}" alt="" data-initial="${initial}"><span class="item-fallback" ${tile} hidden>${initial}</span></span>`;
 }
 
 function entryMarkup(entry: BarEntry, parentId: string): string {
@@ -215,7 +226,7 @@ function entryMarkup(entry: BarEntry, parentId: string): string {
   const glyph = `<span class="item-glyph" aria-hidden="true">${folderIcon()}</span>`;
   const body = entry.kind === 'folder'
     ? `${glyph}<span class="item-label">${escapeHtml(entry.title)}</span>`
-    : `${iconMarkup(entry.title, entry.faviconUrl)}<span class="item-label">${escapeHtml(entry.title)}</span>`;
+    : `${iconMarkup(entry.title, entry.faviconUrl, entry.url)}<span class="item-label">${escapeHtml(entry.title)}</span>`;
   if (entry.kind === 'folder') {
     const children = entry.children.map((child) => entryMarkup(child, entry.id)).join('');
     return `<div class="bar-item folder" data-kind="folder" data-id="${escapeHtml(entry.id)}" data-parent-id="${escapeHtml(parentId)}" draggable="true">` +

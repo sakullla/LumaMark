@@ -65,6 +65,23 @@ const UI_PATHS = {
   monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
   folderPlus: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/>',
   arrowRight: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
+  trash: '<path d="M3.5 6h17"/><path d="M9 6V4h6v2"/><path d="m6 6 .8 13a2 2 0 0 0 2 1.9h6.4a2 2 0 0 0 2-1.9L18 6"/>',
+  inbox: '<path d="M22 13h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 13v5a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5l-3.5-7.9A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.1z"/>',
+  layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
+  rows: '<path d="M4 5h16M4 10h16M4 15h16M4 20h16"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  chevronRight: '<path d="m9 6 6 6-6 6"/>',
+  chevronDown: '<path d="m6 9 6 6 6-6"/>',
+  external: '<path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  replace: '<path d="M4 9a7 7 0 0 1 12.5-3.5L19 8"/><path d="M19 3v5h-5"/><path d="M20 15a7 7 0 0 1-12.5 3.5L5 16"/><path d="M5 21v-5h5"/>',
+  keyboard: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M9 15.5h6"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
 } as const;
 
 export type UiIconName = keyof typeof UI_PATHS;
@@ -78,16 +95,37 @@ export function logoMark(size = 28): string {
   return `<svg class="logo-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="${size}" height="${size}" aria-hidden="true" focusable="false"><defs><linearGradient id="lm-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c6cff"/><stop offset="1" stop-color="#ec5fa8"/></linearGradient></defs><rect width="32" height="32" rx="9" fill="url(#lm-grad)"/><path d="M11 8.5h10a1.5 1.5 0 0 1 1.5 1.5v14l-6.5-3.8L9.5 24V10A1.5 1.5 0 0 1 11 8.5z" fill="#fff" fill-opacity=".95"/><path d="M19.5 4.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" fill="#fff"/></svg>`;
 }
 
+/**
+ * Bookmarks that came from the browser carry no icon. Chromium serves its own favicon cache to extensions, so the
+ * icon needs no request to the site. Elsewhere the letter tile stands in.
+ */
+export function faviconSource(url: string, stored?: string, size = 32): string | undefined {
+  if (stored) return stored;
+  const scope = globalThis as { chrome?: { runtime?: { getURL?: (path: string) => string } } };
+  const base = scope.chrome?.runtime?.getURL?.('/_favicon/');
+  if (!base?.startsWith('chrome-extension:') || !/^https?:/i.test(url)) return undefined;
+  return `${base}?pageUrl=${encodeURIComponent(url)}&size=${size}`;
+}
+
+function showFallback(img: HTMLImageElement): void {
+  img.hidden = true;
+  const fallback = img.parentElement?.querySelector<HTMLElement>('.item-fallback');
+  if (!fallback) return;
+  if (!fallback.textContent) fallback.textContent = img.dataset.initial ?? '';
+  fallback.hidden = false;
+}
+
 export function bindIconFallback(scope: ParentNode): void {
   scope.querySelectorAll<HTMLImageElement>('.item-icon img').forEach((img) => {
-    const show = () => {
-      img.hidden = true;
-      const fallback = img.parentElement?.querySelector<HTMLElement>('.item-fallback');
-      if (!fallback) return;
-      if (!fallback.textContent) fallback.textContent = img.dataset.initial ?? '';
-      fallback.hidden = false;
-    };
-    img.addEventListener('error', show);
-    if (img.complete && img.naturalWidth === 0 && img.src) show();
+    img.addEventListener('error', () => showFallback(img));
+    if (img.complete && img.naturalWidth === 0 && img.src) showFallback(img);
   });
+}
+
+/** Fallback for a long list that grows: one captured listener instead of one per image. */
+export function watchIconFallback(container: HTMLElement): void {
+  container.addEventListener('error', (event) => {
+    const target = event.target as HTMLElement;
+    if (target.tagName === 'IMG') showFallback(target as HTMLImageElement);
+  }, true);
 }
