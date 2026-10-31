@@ -48,6 +48,7 @@ export function titleForSavedLink(info: SaveMenuInfo, hintedTitle?: string): str
 
 export interface ExtensionContextMenus {
   create(properties: { id: string; title: string; contexts: string[] }): void | Promise<void>;
+  remove?(id: string): void | Promise<void>;
   onClicked?: { addListener(listener: (info: SaveMenuInfo, tab?: ActiveTab) => void): void };
 }
 
@@ -174,13 +175,12 @@ export async function saveActivePage(
   return service.save(input, duplicateAction);
 }
 
-export function registerSaveEntrypoints(
+export async function registerSaveEntrypoints(
   api: WebExtensionApi,
   handler: (info?: SaveMenuInfo) => Promise<void>,
   title = 'Save to LumaMark',
-): void {
+): Promise<void> {
   if (api.contextMenus) {
-    void api.contextMenus.create({ id: 'lumamark-save-page', title, contexts: ['page', 'link'] });
     api.contextMenus.onClicked?.addListener((info) => {
       if (info.menuItemId === 'lumamark-save-page') void handler(info);
     });
@@ -188,6 +188,10 @@ export function registerSaveEntrypoints(
   api.commands?.onCommand?.addListener((command) => {
     if (command === 'save-current-page') void handler();
   });
+  if (api.contextMenus) {
+    try { await api.contextMenus.remove?.('lumamark-save-page'); } catch { /* The menu does not exist on first run. */ }
+    await api.contextMenus.create({ id: 'lumamark-save-page', title, contexts: ['page', 'link'] });
+  }
 }
 
 export function saveActionsForResult(result: SaveBookmarkResult): SaveAction[] {

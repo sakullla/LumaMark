@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import 'fake-indexeddb/auto';
-import { captureActivePage, notifySaveResult, resolveExtensionApi, saveActionsForResult, saveActivePage, titleForSavedLink } from '../../packages/browser/src/index';
+import { captureActivePage, notifySaveResult, registerSaveEntrypoints, resolveExtensionApi, saveActionsForResult, saveActivePage, titleForSavedLink, type ExtensionContextMenus, type WebExtensionApi } from '../../packages/browser/src/index';
 import { readLinkTarget, readPageMetadata } from '../../apps/extension/src/content/index';
 import { BookmarkService, makeBookmark, type Bookmark, type Collection } from '../../packages/domain/src/index';
 import { planImport } from '../../packages/import-export/src/index';
@@ -11,6 +11,27 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 
 describe('browser adapter', () => {
+  it('replaces the existing save menu when entry points are registered again', async () => {
+    const created = new Map<string, string>();
+    const remove = vi.fn(async (id: string) => {
+      if (!created.delete(id)) throw new Error('Cannot find menu item');
+    });
+    const contextMenus: ExtensionContextMenus & { remove: typeof remove } = {
+      create: (properties) => {
+        if (created.has(properties.id)) throw new Error(`Cannot create item with duplicate id ${properties.id}`);
+        created.set(properties.id, properties.title);
+      },
+      remove,
+    };
+    const api: WebExtensionApi = { tabs: { query: vi.fn() }, contextMenus };
+
+    await registerSaveEntrypoints(api, vi.fn());
+    await registerSaveEntrypoints(api, vi.fn());
+
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect(created).toEqual(new Map([['lumamark-save-page', 'Save to LumaMark']]));
+  });
+
   it('captures the active tab and preserves a missing title for domain fallback', async () => {
     const api = { tabs: { query: vi.fn().mockResolvedValue([{ url: 'https://example.test/path#part' }]) } };
     await expect(captureActivePage(api)).resolves.toEqual({ url: 'https://example.test/path#part' });
