@@ -99,6 +99,8 @@ describe('browser adapter', () => {
       expect(manifest.chrome_url_overrides).toBeUndefined();
       if (target === 'safari') expect(manifest.permissions).not.toContain('bookmarks');
       else expect(manifest.permissions).toContain('bookmarks');
+      if (target === 'firefox') expect(manifest.permissions).not.toContain('commands');
+      expect(manifest.commands['save-current-page'].suggested_key.default).toBe('Alt+Shift+L');
       expect(manifest.permissions).toContain('alarms');
       if (target === 'chrome' || target === 'safari') expect(manifest.host_permissions).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*']));
       const background = readFileSync(`dist/extension/${target}/background.js`, 'utf8');
