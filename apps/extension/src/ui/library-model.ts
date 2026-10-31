@@ -208,3 +208,93 @@ export function planReplace(bookmarks: readonly Bookmark[], input: { field: Repl
   }
   return plan;
 }
+
+const FIXED_FOLDER_IDS: ReadonlySet<string> = new Set(['root-toolbar', 'root-menu', 'root-mobile']);
+
+/** The bar folder and the browser's own roots stay put: moving or deleting them would be undone by the next browser sync. */
+export function isLockedFolder(folder: Pick<Collection, 'id' | 'toolbar'>): boolean {
+  return folder.toolbar === true || FIXED_FOLDER_IDS.has(folder.id);
+}
+
+/** What deleting a folder would touch, so the question can name real numbers. */
+export function folderFootprint(bookmarks: readonly Bookmark[], collections: readonly Collection[], id: string): { folderIds: string[]; subfolders: number; bookmarkIds: string[] } {
+  const folders = folderDescendants(collections, id);
+  const bookmarkIds = liveBookmarks(bookmarks).filter((bookmark) => bookmark.collectionId !== undefined && folders.has(bookmark.collectionId)).map((bookmark) => bookmark.id);
+  return { folderIds: [...folders], subfolders: folders.size - 1, bookmarkIds };
+}
+
+/** Ancestors from the top down, the current folder last. */
+export function folderTrail(collections: readonly Collection[], id: string): Collection[] {
+  const byId = new Map(collections.filter((collection) => !collection.deletedAt).map((collection) => [collection.id, collection]));
+  const trail: Collection[] = [];
+  const seen = new Set<string>();
+  for (let current = byId.get(id); current && !seen.has(current.id); current = current.parentId ? byId.get(current.parentId) : undefined) {
+    seen.add(current.id);
+    trail.unshift(current);
+  }
+  return trail;
+}
+
+/** Folders that may receive `id`: everything except the folder itself and what sits inside it. */
+export function moveTargets(collections: readonly Collection[], id: string | undefined): Collection[] {
+  const blocked = id ? folderDescendants(collections, id) : new Set<string>();
+  return collections.filter((collection) => !collection.deletedAt && !blocked.has(collection.id));
+}
+
+/** Keep a floating menu fully on screen: flip at the right and bottom edges, then pin inside the margin. */
+export function placeMenu(point: { x: number; y: number }, menu: { width: number; height: number }, view: { width: number; height: number }, margin = 8): { left: number; top: number } {
+  const left = point.x + menu.width + margin > view.width ? point.x - menu.width : point.x;
+  const top = point.y + menu.height + margin > view.height ? point.y - menu.height : point.y;
+  return {
+    left: Math.max(margin, Math.min(left, view.width - menu.width - margin)),
+    top: Math.max(margin, Math.min(top, view.height - menu.height - margin)),
+  };
+}
+
+/** Text as typed into the add dialog: a bare domain gets https, anything else is left for validation to judge. */
+export function typedUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || /^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return trimmed;
+  return /^[^\s/]+\.[^\s/]+/.test(trimmed) ? `https://${trimmed}` : trimmed;
+}
+
+export type PaletteHit =
+  | { kind: 'scope'; scope: LibraryScope; label: string; detail?: string }
+  | { kind: 'folder'; id: string; label: string; detail?: string }
+  | { kind: 'tag'; tag: string; label: string; count: number }
+  | { kind: 'bookmark'; bookmark: Bookmark }
+  | { kind: 'command'; id: string; label: string };
+
+export interface PaletteSource {
+  bookmarks: readonly Bookmark[];
+  collections: readonly Collection[];
+  scopes: ReadonlyArray<{ scope: LibraryScope; label: string }>;
+  commands: ReadonlyArray<{ id: string; label: string }>;
+  limit?: number;
+}
+
+const matches = (value: string, words: readonly string[]) => {
+  const lower = value.toLowerCase();
+  return words.every((word) => lower.includes(word));
+};
+
+/** Everything the palette can reach, best kind first. Every word must match; an empty query offers commands and views. */
+export function paletteResults(query: string, source: PaletteSource): PaletteHit[] {
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const limit = source.limit ?? 40;
+  const commands: PaletteHit[] = source.commands.filter((item) => matches(item.label, words)).map((item) => ({ kind: 'command', ...item }));
+  const scopes: PaletteHit[] = source.scopes.filter((item) => matches(item.label, words)).map((item) => ({ kind: 'scope', ...item }));
+  if (!words.length) return [...commands, ...scopes].slice(0, limit);
+  const paths = folderPaths(source.collections);
+  const folders: PaletteHit[] = [...paths].filter(([, path]) => matches(path, words)).map(([id, path]) => {
+    const name = source.collections.find((item) => item.id === id)?.name ?? path;
+    return { kind: 'folder', id, label: name, detail: path === name ? undefined : path };
+  });
+  const tags: PaletteHit[] = tagCounts(source.bookmarks).filter((tag) => matches(tag.name, words)).map((tag) => ({ kind: 'tag', tag: tag.name, label: tag.name, count: tag.count }));
+  const found: PaletteHit[] = [];
+  for (const bookmark of liveBookmarks(source.bookmarks)) {
+    if (found.length >= limit) break;
+    if (matches(`${bookmark.title} ${bookmark.url} ${bookmark.tags.join(' ')} ${bookmark.notes}`, words)) found.push({ kind: 'bookmark', bookmark });
+  }
+  return [...scopes, ...folders, ...tags, ...found, ...commands].slice(0, limit);
+}

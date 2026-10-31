@@ -30,6 +30,7 @@ import {
 } from '../../../../packages/browser/src/index';
 import { copyFor, languageFromApi, notificationCopy } from '../ui/copy';
 import { DEFAULT_SEARCH_URL, isHttpUrl, nextSiblingPosition, normalizeSearchUrl, toolbarFolder } from '../ui/bar';
+import { folderDescendants } from '../ui/library-model';
 import { placeItem } from './place';
 import { normalizeBridgeState, reconcileNativeBookmarks, type BridgeState, type NativeBookmarksApi, type ReconcileReport } from './native';
 import { probeWebDav } from './probe';
@@ -470,6 +471,18 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
         return { ok: true, page: {}, savable: false, unsavable: true };
       }
     });
+    if (type === 'lumamark-add') return accept(async () => {
+      const url = String(payload.url ?? '').trim();
+      if (!isSavablePageUrl(url)) return { ok: false, error: 'invalid-url' };
+      const collectionId = typeof payload.collectionId === 'string' && payload.collectionId ? payload.collectionId : undefined;
+      try {
+        const position = nextSiblingPosition(collectionId, await repository.list({ includeDeleted: true }), await repository.listCollections());
+        const result = await service.save({ url, title: payload.title ? String(payload.title) : undefined, tags: Array.isArray(payload.tags) ? payload.tags : undefined, notes: payload.notes ? String(payload.notes) : undefined, collectionId, position }, 'existing');
+        return { ok: true, result };
+      } catch {
+        return { ok: false, error: 'invalid-url' };
+      }
+    });
     if (type === 'lumamark-open-library') return accept(async () => {
       const target = typeof payload.bookmarkId === 'string' && payload.bookmarkId ? `library.html?bookmark=${encodeURIComponent(payload.bookmarkId)}` : 'library.html';
       await openExtensionPage(target);
@@ -525,17 +538,24 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       const items = await repository.listCollections();
       const current = items.find((item) => item.id === payload.id);
       if (!current) throw new Error('Collection not found');
-      const deleted = { ...current, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), revision: current.revision + 1 };
-      await repository.putCollection(deleted);
-      return { ok: true, item: deleted };
+      // Subfolders go with their parent; a live child of a deleted folder would drop out of the tree and take its bookmarks with it.
+      const now = new Date().toISOString();
+      const ids = [...folderDescendants(items, current.id)];
+      for (const id of ids) {
+        const folder = items.find((item) => item.id === id);
+        if (folder && !folder.deletedAt) await repository.putCollection({ ...folder, deletedAt: now, updatedAt: now, revision: folder.revision + 1 });
+      }
+      return { ok: true, ids };
     });
     if (type === 'lumamark-collection-restore') return accept(async () => {
       const items = await repository.listCollections();
-      const current = items.find((item) => item.id === payload.id);
-      if (!current) throw new Error('Collection not found');
-      const restored = { ...current, deletedAt: undefined, updatedAt: new Date().toISOString(), revision: current.revision + 1 };
-      await repository.putCollection(restored);
-      return { ok: true, item: restored };
+      const ids: string[] = Array.isArray(payload.ids) ? payload.ids.map(String) : [String(payload.id)];
+      if (!items.some((item) => ids.includes(item.id))) throw new Error('Collection not found');
+      const now = new Date().toISOString();
+      for (const folder of items) {
+        if (ids.includes(folder.id) && folder.deletedAt) await repository.putCollection({ ...folder, deletedAt: undefined, updatedAt: now, revision: folder.revision + 1 });
+      }
+      return { ok: true };
     });
     if (type === 'lumamark-list-conflicts') return accept(async () => ({ ok: true, items: await repository.listConflicts() }));
     if (type === 'lumamark-sync-status') return accept(async () => ({ ok: true, metadata: await repository.getSyncMetadata() }));

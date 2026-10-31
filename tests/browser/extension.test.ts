@@ -450,6 +450,33 @@ describe('browser adapter', () => {
     expect(await repository.list({ includeDeleted: true })).toHaveLength(1);
   });
 
+  it('deletes a folder with its subfolders and brings them back together', async () => {
+    const repository = new IndexedDbRepository(`lumamark-tree-${crypto.randomUUID()}`);
+    const stamp = new Date().toISOString();
+    const folder = (id: string, parentId?: string): Collection => ({ id, name: id, parentId, position: 0, toolbar: false, createdAt: stamp, updatedAt: stamp, revision: 1 });
+    for (const item of [folder('top'), folder('child', 'top'), folder('leaf', 'child'), folder('other')]) await repository.putCollection(item);
+    let listener: ((message: unknown, sender: unknown, respond: (value: any) => void) => unknown) | undefined;
+    await startBackground({ runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } as never, repository);
+    const send = (message: unknown) => new Promise<any>((resolve) => { listener?.(message, {}, resolve); });
+    const removed = await send({ type: 'lumamark-collection-delete', payload: { id: 'top' } });
+    expect([...removed.ids].sort()).toEqual(['child', 'leaf', 'top']);
+    const live = async () => (await repository.listCollections()).filter((item) => !item.deletedAt).map((item) => item.id).sort();
+    expect(await live()).toEqual(['other']);
+    expect((await send({ type: 'lumamark-collection-restore', payload: { ids: removed.ids } })).ok).toBe(true);
+    expect(await live()).toEqual(['child', 'leaf', 'other', 'top']);
+  });
+
+  it('adds a typed address to a folder and refuses what cannot be saved', async () => {
+    const repository = new IndexedDbRepository(`lumamark-add-${crypto.randomUUID()}`);
+    let listener: ((message: unknown, sender: unknown, respond: (value: any) => void) => unknown) | undefined;
+    await startBackground({ runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } } } as never, repository);
+    const send = (message: unknown) => new Promise<any>((resolve) => { listener?.(message, {}, resolve); });
+    const added = await send({ type: 'lumamark-add', payload: { url: 'https://typed.example/a', title: 'Typed', tags: ['x'], collectionId: 'f1' } });
+    expect(added.result.bookmark).toMatchObject({ title: 'Typed', collectionId: 'f1', tags: ['x'] });
+    expect((await send({ type: 'lumamark-add', payload: { url: 'https://typed.example/a' } })).result.kind).toBe('existing');
+    expect(await send({ type: 'lumamark-add', payload: { url: 'javascript:alert(1)' } })).toEqual({ ok: false, error: 'invalid-url' });
+  });
+
   it('probes WebDAV, omits the password, and keeps the search address out of the sync manifest', async () => {
     const repository = new IndexedDbRepository(`lumamark-probe-${crypto.randomUUID()}`);
     const kept = makeBookmark({ url: 'https://kept.example/a', title: 'Kept' });
