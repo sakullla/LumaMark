@@ -19,18 +19,26 @@ import {
   type LibraryFilters,
 } from '../ui/index';
 import { bookmarkCountLabel, copyFor, detectUiLanguage, fill, fillCount, relativeTime } from '../ui/copy';
-import { uiIcon, watchIconFallback } from '../ui/icons';
+import { createContextMenu, type MenuEntry } from '../ui/context-menu';
+import { uiIcon, watchIconFallback, type UiIconName } from '../ui/icons';
+import { applyPreferences, readPreferences, resolvedTheme, savePreference } from '../ui/theme';
 import { escapeHtml } from '../ui/html';
-import { homeSyncPhrase, isHttpUrl } from '../ui/bar';
+import { dropIntent, homeSyncPhrase, isHttpUrl } from '../ui/bar';
 import {
   aliveFolderIds,
   deletedBookmarks,
   domainCounts,
   duplicateGroups,
   extraDuplicateIds,
+  folderDescendants,
+  folderFootprint,
   folderPaths,
+  folderTrail,
+  isLockedFolder,
   isUnfiled,
   liveBookmarks,
+  moveTargets,
+  paletteResults,
   parseTags,
   planReplace,
   rangeIds,
@@ -40,9 +48,11 @@ import {
   scopeKey,
   tagChanges,
   tagCounts,
+  typedUrl,
   undoChanges,
   type BatchChange,
   type LibraryScope,
+  type PaletteHit,
   type ReplaceField,
 } from '../ui/library-model';
 import { chooseTextFile } from './files';
@@ -72,6 +82,8 @@ const PAGE_SIZE = 120;
 const CONFIRM_DELETE_AT = 100;
 const CONFIRM_OPEN_AT = 10;
 const UNFILED_TARGET = '__unfiled';
+const TOP_TARGET = '__top';
+const TAG_PREVIEW = 12;
 const VIEW_KEY = 'lumamark-library-view';
 const COLLAPSED_KEY = 'lumamark-collapsed-folders';
 
@@ -115,6 +127,9 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   let editorBaseline = '';
   let lastUndo: (() => Promise<unknown>) | undefined;
   const collapsed = new Set(readJson<string[]>(COLLAPSED_KEY, []));
+  const menu = createContextMenu();
+  let inlineEditing = false;
+  let tagsExpanded = false;
 
   const get = <T extends Element = HTMLElement>(selector: string) => root.querySelector<T>(selector);
   const results = () => get('#results');
@@ -184,29 +199,40 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     return dialog;
   };
 
-  const ask = (message: string, confirmLabel = text.delete) => new Promise<boolean>((resolve) => {
+  type Decision = 'confirm' | 'alt' | 'cancel';
+  /** The one yes/no question of the page. `alt` adds a second way to say yes. */
+  const decide = (message: string, options: { confirm?: string; title?: string; alt?: string } = {}) => new Promise<Decision>((resolve) => {
     const dialog = get<HTMLDialogElement>('#decision');
+    const heading = get('#decision-heading');
     const label = get('#decision-text');
     const yes = get<HTMLButtonElement>('#decision-confirm');
     const no = get<HTMLButtonElement>('#decision-cancel');
-    if (!dialog || !yes || !no) { resolve(false); return; }
+    const alt = get<HTMLButtonElement>('#decision-alt');
+    if (!dialog || !yes || !no) { resolve('cancel'); return; }
+    if (heading) heading.textContent = options.title ?? text.confirmTitle;
     if (label) label.textContent = message;
-    yes.textContent = confirmLabel;
-    const finish = (value: boolean) => {
+    yes.textContent = options.confirm ?? text.delete;
+    if (alt) { alt.hidden = !options.alt; alt.textContent = options.alt ?? ''; }
+    dialog.classList.toggle('has-choice', Boolean(options.alt));
+    const finish = (value: Decision) => {
       dialog.close();
       yes.removeEventListener('click', onYes);
+      alt?.removeEventListener('click', onAlt);
       no.removeEventListener('click', onNo);
       dialog.removeEventListener('cancel', onNo);
       resolve(value);
     };
-    const onYes = () => finish(true);
-    const onNo = () => finish(false);
+    const onYes = () => finish('confirm');
+    const onAlt = () => finish('alt');
+    const onNo = () => finish('cancel');
     yes.addEventListener('click', onYes);
+    alt?.addEventListener('click', onAlt);
     no.addEventListener('click', onNo);
     dialog.addEventListener('cancel', onNo);
     dialog.showModal();
     no.focus();
   });
+  const ask = async (message: string, confirm = text.delete) => await decide(message, { confirm }) === 'confirm';
 
   const askName = (title: string, initial = '') => new Promise<string | undefined>((resolve) => {
     const dialog = get<HTMLDialogElement>('#name-dialog');
@@ -328,7 +354,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (scope.kind === 'recent') return renderNotice('clock', text.recentEmpty, text.recentEmptyHelp);
     if (scope.kind === 'unfiled') return renderNotice('inbox', text.unfiledEmpty, text.unfiledEmptyHelp);
     if (scope.kind === 'tag') return renderNotice('tag', text.noMatches, text.tagEmpty);
-    if (scope.kind === 'folder' && liveBookmarks(bookmarks).length) return renderNotice('folder', text.emptyFolder, text.noMatchesHelp);
+    if (scope.kind === 'folder' && liveBookmarks(bookmarks).length) return renderNotice('folder', text.emptyFolder, text.clearTrashHint, { id: 'add-bookmark', label: text.addBookmark });
     return renderEmptyState(defaultLibraryFilters(), language);
   };
 
@@ -351,7 +377,20 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (head) head.hidden = !visible.length;
   };
 
+  const paintThemeButton = () => {
+    const button = get('#toggle-theme');
+    if (button) button.innerHTML = uiIcon(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon');
+  };
+
+  const toggleTheme = () => {
+    const prefersDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
+    savePreference('theme', resolvedTheme(readPreferences().theme, prefersDark) === 'dark' ? 'light' : 'dark');
+    applyPreferences();
+    paintThemeButton();
+  };
+
   const renderSidebar = () => {
+    if (inlineEditing) return;
     const live = liveBookmarks(bookmarks);
     const alive = aliveFolderIds(collections);
     const since = new Date(Date.now() - RECENT_DAYS * 86_400_000).toISOString();
@@ -370,7 +409,13 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     const tagGroup = get('#tags-group');
     if (tagGroup) tagGroup.hidden = !tags.length;
     const tagList = get('#tag-list');
-    if (tagList) tagList.innerHTML = renderTagList(tags, scope.kind === 'tag' ? scope.tag : undefined);
+    if (tagList) tagList.innerHTML = renderTagList(tags, scope.kind === 'tag' ? scope.tag : undefined, tagsExpanded ? undefined : TAG_PREVIEW);
+    const tagToggle = get('#tags-toggle');
+    if (tagToggle) {
+      tagToggle.hidden = tags.length <= TAG_PREVIEW;
+      tagToggle.textContent = tagsExpanded ? text.showFewerTags : fill(text.showMoreTags, { n: tags.length });
+    }
+    paintThemeButton();
     const options = (values: Array<{ name: string }>) => values.map((value) => `<option value="${escapeHtml(value.name)}"></option>`).join('');
     const tagOptions = get('#tag-options');
     if (tagOptions) tagOptions.innerHTML = options(tags);
@@ -400,15 +445,14 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (count) count.textContent = bookmarkCountLabel(visible.length, language);
     if (typeof document !== 'undefined') document.title = `${scopeTitle()} · LumaMark`;
 
-    const menu = get<HTMLDetailsElement>('#scope-menu');
-    if (menu) {
-      menu.hidden = scope.kind !== 'folder' && scope.kind !== 'tag';
-      menu.open = false;
-      root.querySelectorAll<HTMLElement>('[data-menu-for]').forEach((group) => { group.hidden = group.dataset.menuFor !== scope.kind; });
-      const summary = menu.querySelector('summary');
-      const label = scope.kind === 'tag' ? text.tagMenu : text.folderMenu;
-      summary?.setAttribute('aria-label', label);
-      summary?.setAttribute('title', label);
+    const more = get('#scope-more');
+    if (more) more.hidden = scope.kind !== 'folder' && scope.kind !== 'tag';
+    const trailHost = get('#folder-trail');
+    if (trailHost) {
+      const here: LibraryScope = scope;
+      const trail = here.kind === 'folder' ? folderTrail(collections, here.id).slice(0, -1) : [];
+      trailHost.hidden = !trail.length;
+      trailHost.innerHTML = trail.map((folder) => `<button type="button" data-select-folder="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</button>${uiIcon('chevronRight')}`).join('');
     }
     const replace = get('#open-replace');
     if (replace) replace.hidden = scope.kind === 'trash' || !visible.length;
@@ -416,9 +460,6 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     // Bulk tools differ in Trash: the only thing to do there is bring bookmarks back.
     root.querySelectorAll<HTMLElement>('[data-batch]').forEach((group) => { group.hidden = (group.dataset.batch === 'trash') !== (scope.kind === 'trash'); });
 
-    const moveOptions = `<option value="">${escapeHtml(text.chooseFolder)}</option><option value="${UNFILED_TARGET}">${escapeHtml(text.unfiled)}</option>${collectionOptions(collections, '', language)}`;
-    const batchSelect = get<HTMLSelectElement>('#batch-collection');
-    if (batchSelect) batchSelect.innerHTML = moveOptions;
     const editorSelect = get<HTMLSelectElement>('#editor-folder');
     const editorFolder = editorSelect?.value ?? '';
     if (editorSelect) editorSelect.innerHTML = `<option value="">${escapeHtml(text.unfiled)}</option>${collectionOptions(collections, editorFolder, language)}`;
@@ -609,6 +650,11 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     folder.innerHTML = `<option value="">${escapeHtml(text.unfiled)}</option>${collectionOptions(collections, bookmark.collectionId ?? '', language)}`;
     const error = get('#editor-error');
     if (error) error.textContent = '';
+    const openLink = get<HTMLAnchorElement>('#editor-open');
+    if (openLink) {
+      openLink.hidden = !isHttpUrl(bookmark.url);
+      openLink.href = isHttpUrl(bookmark.url) ? bookmark.url : '#';
+    }
     const icon = get('#editor-icon');
     if (icon) icon.innerHTML = siteIcon(bookmark.url, bookmark.title, bookmark.domain, bookmark.faviconUrl);
     const meta = get('#editor-meta');
@@ -723,10 +769,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   get('#batch-delete')?.addEventListener('click', () => { void deleteIds([...selection]); });
   get('#batch-restore')?.addEventListener('click', () => { void restoreIds([...selection]); });
   get('#batch-open')?.addEventListener('click', () => { void openIds([...selection]); });
-  get('#batch-move')?.addEventListener('click', () => {
-    const target = get<HTMLSelectElement>('#batch-collection')?.value ?? '';
-    if (selection.size && target) void moveIds([...selection], target);
-  });
+  get('#batch-move')?.addEventListener('click', () => { void moveSelection([...selection]); });
   get('#batch-favorite')?.addEventListener('click', () => {
     const items = selected();
     void setFavorite(items.map((item) => item.id), !items.every((item) => item.favorite));
@@ -866,6 +909,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
 
   const actions: Record<string, () => void | Promise<void>> = {
     'clean-duplicates': () => deleteIds(extraDuplicateIds(groups)),
+    'add-bookmark': () => openAdd(),
     'restore-all': () => restoreIds(visible.map((bookmark) => bookmark.id)),
     'clear-filters': () => { form?.reset(); },
     'save-page': async () => {
@@ -887,6 +931,11 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     const mouse = event as MouseEvent;
     const target = event.target as HTMLElement;
     closeMenus(target.closest('details.menu'));
+
+    const folderMore = target.closest<HTMLElement>('[data-folder-menu]');
+    if (folderMore) { openFolderMenu(folderMore.dataset.folderMenu ?? '', folderMore); return; }
+    const folderAdd = target.closest<HTMLElement>('[data-folder-add]');
+    if (folderAdd) { void createFolder(folderAdd.dataset.folderAdd); return; }
 
     const twisty = target.closest<HTMLElement>('[data-toggle-folder]');
     if (twisty) {
@@ -948,6 +997,11 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     }
     if (action === 'edit') { setCursor(id, false); await switchEditor(id); return; }
     if (action === 'delete') { await deleteIds([id]); return; }
+    if (action === 'more') {
+      const button = target.closest<HTMLElement>('[data-action="more"]');
+      if (button) openBookmarkMenu(id, button);
+      return;
+    }
     if (action === 'restore') { await restoreIds([id]); return; }
     if (target.closest('a, button, label, input')) return;
     setCursor(id, false);
@@ -962,8 +1016,11 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     const key = event as KeyboardEvent;
     const target = key.target as HTMLElement | null;
     if (get('dialog[open]')) return;
+    if (menu.isOpen()) return;
     const typing = isTyping(target);
     const command = key.ctrlKey || key.metaKey;
+    if (command && key.key.toLowerCase() === 'k') { key.preventDefault(); openPalette(); return; }
+    if (!typing && !command && target?.closest('.tree-button[data-select-folder]') && treeKey(key, target)) return;
 
     if (key.key === 'Escape') {
       const openMenu = get('details.menu[open]');
@@ -987,6 +1044,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (command) return;
     if (key.key === '/') { key.preventDefault(); get('#search')?.focus(); return; }
     if (key.key === '?') { key.preventDefault(); openDialog('#shortcut-dialog'); return; }
+    if (key.key === 'n' && !key.shiftKey && !key.altKey) { key.preventDefault(); openAdd(); return; }
 
     const step = key.key === 'ArrowDown' || key.key === 'j' ? 1 : key.key === 'ArrowUp' || key.key === 'k' ? -1 : 0;
     if (step) {
@@ -1062,37 +1120,70 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     }
     get('.library-shell')?.classList.add('is-dragging');
   });
-  const clearDrop = () => root.querySelectorAll('.is-drop').forEach((item) => item.classList.remove('is-drop'));
+  const clearDrop = () => {
+    root.querySelectorAll('.is-drop').forEach((item) => item.classList.remove('is-drop'));
+    root.querySelectorAll<HTMLElement>('[data-drop-intent]').forEach((item) => { delete item.dataset.dropIntent; });
+    folderDrop = undefined;
+  };
   const dropTarget = (event: Event) => (event.target as HTMLElement).closest?.<HTMLElement>('[data-drop]');
+  const finishDrag = () => {
+    dragged = undefined;
+    clearDrop();
+    get('.library-shell')?.classList.remove('is-dragging');
+  };
+
+  /** Where a dragged folder would land: above, below or inside the row under the pointer, or at the top of the list. */
+  let folderDrop: { parentId?: string; beforeId?: string } | undefined;
+  const aimFolder = (drag: DragEvent, movingId: string): boolean => {
+    const target = drag.target as HTMLElement;
+    if (target.closest?.('[data-tree-root]')) {
+      const title = target.closest<HTMLElement>('[data-tree-root]')!;
+      clearDrop();
+      title.dataset.dropIntent = 'inside';
+      folderDrop = {};
+      return true;
+    }
+    const row = target.closest?.<HTMLElement>('.tree-row');
+    const node = row?.closest<HTMLElement>('[data-folder-node]');
+    const id = node?.dataset.folderNode;
+    if (!row || !node || !id || folderDescendants(collections, movingId).has(id)) { clearDrop(); return false; }
+    const box = row.getBoundingClientRect();
+    const intent = dropIntent({ kind: 'folder', start: box.top, size: box.height, point: drag.clientY });
+    clearDrop();
+    row.dataset.dropIntent = intent;
+    const parentId = collections.find((item) => item.id === id)?.parentId;
+    if (intent === 'inside') folderDrop = { parentId: id };
+    else if (intent === 'before') folderDrop = { parentId, beforeId: id };
+    else folderDrop = { parentId, beforeId: (node.nextElementSibling as HTMLElement | null)?.dataset?.folderNode };
+    return true;
+  };
+
   root.addEventListener('dragover', (event) => {
+    const drag = event as DragEvent;
+    if (!dragged) return;
+    if (dragged.kind === 'folder') {
+      if (aimFolder(drag, dragged.id)) event.preventDefault();
+      return;
+    }
     const target = dropTarget(event);
-    if (!dragged || !target) return;
-    if (dragged.kind === 'folder' && !target.dataset.drop?.startsWith('folder:')) return;
+    if (!target) return;
     event.preventDefault();
     if (!target.classList.contains('is-drop')) { clearDrop(); target.classList.add('is-drop'); }
   });
   root.addEventListener('dragleave', (event) => { dropTarget(event)?.classList.remove('is-drop'); });
-  root.addEventListener('dragend', () => {
-    dragged = undefined;
-    clearDrop();
-    get('.library-shell')?.classList.remove('is-dragging');
-  });
+  root.addEventListener('dragend', finishDrag);
   root.addEventListener('drop', async (event) => {
     const target = dropTarget(event)?.dataset.drop;
     const moving = dragged;
-    dragged = undefined;
-    clearDrop();
-    get('.library-shell')?.classList.remove('is-dragging');
-    if (!target || !moving) return;
+    const landing = folderDrop;
+    finishDrag();
+    if (!moving) return;
     event.preventDefault();
     if (moving.kind === 'folder') {
-      const parentId = target.slice('folder:'.length);
-      if (parentId === moving.id) return;
-      const response = await sendRuntime(port, 'reorder', { kind: 'folder', id: moving.id, parentId });
-      if (response?.ok === false) say(text.notSaved);
-      await load();
+      if (landing) await placeFolder(moving.id, landing.parentId, landing.beforeId);
       return;
     }
+    if (!target) return;
     if (target === 'trash') await deleteIds(moving.ids);
     else if (target === 'favorites') await setFavorite(moving.ids, true);
     else if (target === 'unfiled') await moveIds(moving.ids, UNFILED_TARGET);
@@ -1101,79 +1192,489 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   });
 
   // ── Folders and tags ──
-  const showNewFolder = (show: boolean) => {
-    const box = get('#new-folder-form');
-    if (box) box.hidden = !show;
-    if (show) get('#new-collection')?.focus();
-  };
-  const createFolder = async () => {
-    const input = get<HTMLInputElement>('#new-collection');
-    const name = input?.value.trim();
-    if (!name) { showNewFolder(false); return; }
-    const response = await sendRuntime(port, 'collection-create', { name });
-    if (input) input.value = '';
-    showNewFolder(false);
-    await load();
-    if (response?.item?.id) setScope({ kind: 'folder', id: response.item.id });
-  };
-  get('#show-new-folder')?.addEventListener('click', () => showNewFolder(Boolean(get('#new-folder-form')?.hidden)));
-  get('#create-collection')?.addEventListener('click', () => { void createFolder(); });
-  get('#new-collection')?.addEventListener('keydown', (event) => {
-    const key = (event as KeyboardEvent).key;
-    if (key === 'Enter') { event.preventDefault(); void createFolder(); }
-    if (key === 'Escape') { event.stopPropagation(); showNewFolder(false); }
+  const folderById = (id: string | undefined) => collections.find((item) => item.id === id && !item.deletedAt);
+
+  /** Type a name right in the tree. Enter or leaving the field keeps it; Esc walks away. */
+  const typeFolderName = (host: HTMLElement, initial: string, placeholder: string) => new Promise<string | undefined>((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'tree-input';
+    input.value = initial;
+    input.placeholder = placeholder;
+    input.setAttribute('aria-label', placeholder);
+    let done = false;
+    const finish = (value: string | undefined) => {
+      if (done) return;
+      done = true;
+      inlineEditing = false;
+      resolve(value?.trim() || undefined);
+    };
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.isComposing) return;
+      if (event.key === 'Enter') { event.preventDefault(); finish(input.value); }
+      if (event.key === 'Escape') { event.preventDefault(); finish(undefined); }
+    });
+    input.addEventListener('blur', () => finish(input.value));
+    inlineEditing = true;
+    host.append(input);
+    input.focus();
+    input.select();
   });
 
-  const folderInScope = () => (scope.kind === 'folder' ? collections.find((item) => item.id === (scope as { id: string }).id) : undefined);
+  const nodeOf = (id: string) => get(`[data-folder-node="${CSS.escape(id)}"]`);
+  const focusFolder = (id: string) => (nodeOf(id)?.querySelector<HTMLElement>(':scope > .tree-row > .tree-button'))?.focus();
 
-  get('#rename-folder')?.addEventListener('click', async () => {
-    const folder = folderInScope();
-    if (!folder) return;
-    const name = await askName(text.renameFolder, folder.name);
-    if (!name || name === folder.name) return;
+  const createFolder = async (parentId?: string) => {
+    const parent = folderById(parentId);
+    if (parent && collapsed.delete(parent.id)) { writeJson(COLLAPSED_KEY, [...collapsed]); renderSidebar(); }
+    const draft = document.createElement('div');
+    draft.className = 'tree-row tree-draft';
+    draft.innerHTML = `<span class="tree-icon" aria-hidden="true">${uiIcon('folder')}</span>`;
+    const node = parent ? nodeOf(parent.id) : undefined;
+    let shelf = get('#folder-tree') as HTMLElement | null;
+    if (node) {
+      shelf = node.querySelector<HTMLElement>(':scope > .tree-children');
+      if (!shelf) {
+        shelf = document.createElement('div');
+        shelf.className = 'tree-children';
+        node.append(shelf);
+      }
+    }
+    if (!shelf) return;
+    shelf.append(draft);
+    draft.scrollIntoView({ block: 'nearest' });
+    const name = await typeFolderName(draft, '', text.newFolder);
+    draft.remove();
+    if (!name) { renderSidebar(); return; }
+    const response = await sendRuntime(port, 'collection-create', { name, parentId: parent?.id });
+    if (response?.ok && response.item?.id) {
+      const id = response.item.id as string;
+      showUndo(text.folderCreated, () => sendRuntime(port, 'collection-delete', { id }));
+    } else say(text.notSaved);
+    await load();
+  };
+
+  const renameFolder = async (folder: Collection) => {
+    const node = nodeOf(folder.id) as HTMLElement | null;
+    const row = node?.querySelector<HTMLElement>(':scope > .tree-row');
+    // A folder scrolled out of reach, or hidden in a closed parent, still renames through the dialog.
+    const name = row && node
+      ? await (async () => {
+        node.draggable = false;
+        row.classList.add('is-renaming');
+        const value = await typeFolderName(row, folder.name, text.renameFolder);
+        row.querySelector('.tree-input')?.remove();
+        row.classList.remove('is-renaming');
+        node.draggable = true;
+        return value;
+      })()
+      : await askName(text.renameFolder, folder.name);
+    if (!name || name === folder.name) { renderSidebar(); focusFolder(folder.id); return; }
     const response = await sendRuntime(port, 'collection-update', { id: folder.id, name });
     say(response?.ok ? text.folderRenamed : text.notSaved);
     await load();
-  });
-  get('#add-subfolder')?.addEventListener('click', async () => {
-    const folder = folderInScope();
-    if (!folder) return;
-    const name = await askName(text.newSubfolder);
-    if (!name) return;
-    collapsed.delete(folder.id);
-    await sendRuntime(port, 'collection-create', { name, parentId: folder.id });
-    await load();
-  });
-  get('#use-as-bar')?.addEventListener('click', async () => {
-    const folder = folderInScope();
-    if (!folder) return;
+    focusFolder(folder.id);
+  };
+
+  const useAsBar = async (folder: Collection) => {
     const response = await sendRuntime(port, 'set-toolbar', { id: folder.id });
     say(response?.ok ? text.barChanged : text.notSaved);
     await load();
-  });
-  get('#delete-folder')?.addEventListener('click', async () => {
-    const folder = folderInScope();
-    if (!folder || !await ask(fill(text.confirmDeleteFolder, { v: folder.name }))) return;
+  };
+
+  const deleteFolder = async (folder: Collection) => {
+    if (isLockedFolder(folder)) { say(text.deleteBarBlocked); return; }
+    const footprint = folderFootprint(bookmarks, collections, folder.id);
+    const count = footprint.bookmarkIds.length;
+    let trashBookmarks = false;
+    if (count || footprint.subfolders) {
+      const answer = await decide(fill(text.deleteFolderHelp, { bookmarks: count, folders: footprint.subfolders, bs: count === 1 ? '' : 's', fs: footprint.subfolders === 1 ? '' : 's' }), {
+        title: fill(text.confirmDeleteFolderTitle, { v: folder.name }),
+        confirm: text.deleteFolderKeep,
+        alt: count ? text.deleteFolderAll : undefined,
+      });
+      if (answer === 'cancel') return;
+      trashBookmarks = answer === 'alt';
+    }
     const response = await sendRuntime(port, 'collection-delete', { id: folder.id });
-    if (response?.ok) showUndo(text.folderDeleted, () => sendRuntime(port, 'collection-restore', { id: folder.id }));
-    setScope({ kind: 'all' });
+    if (!response?.ok) { say(text.notSaved); await load(); return; }
+    const ids: string[] = Array.isArray(response.ids) ? response.ids : [folder.id];
+    if (trashBookmarks) {
+      await sendRuntime(port, 'delete', { ids: footprint.bookmarkIds });
+      showUndo(fillCount(text.folderTrashed, count), async () => {
+        await sendRuntime(port, 'restore', { ids: footprint.bookmarkIds });
+        return sendRuntime(port, 'collection-restore', { ids });
+      });
+    } else showUndo(text.folderDeleted, () => sendRuntime(port, 'collection-restore', { ids }));
     await load();
+  };
+
+  /** Put a folder somewhere else, and remember where it was so the move can be taken back. */
+  const placeFolder = async (id: string, parentId: string | undefined, beforeId?: string) => {
+    const folder = folderById(id);
+    if (!folder || (beforeId === id) || (parentId !== undefined && folderDescendants(collections, id).has(parentId))) return;
+    const siblings = collections.filter((item) => !item.deletedAt && item.parentId === folder.parentId).sort((left, right) => left.position - right.position);
+    const oldBefore = siblings[siblings.findIndex((item) => item.id === id) + 1]?.id;
+    const oldParent = folder.parentId;
+    const response = await sendRuntime(port, 'reorder', { kind: 'folder', id, parentId, beforeId });
+    if (response?.ok === false || !response) say(text.notSaved);
+    else {
+      if (parentId && collapsed.delete(parentId)) writeJson(COLLAPSED_KEY, [...collapsed]);
+      showUndo(text.folderMoved, () => sendRuntime(port, 'reorder', { kind: 'folder', id, parentId: oldParent, beforeId: oldBefore }));
+    }
+    await load();
+  };
+
+  // ── Move picker ──
+  type PickRow = { value: string; label: string; detail?: string; icon: UiIconName; create?: string };
+  /** A list that answers to typing, because a <select> stops being usable around the fiftieth folder. */
+  const pickFolder = (title: string, base: PickRow[], folders: readonly Collection[]) => new Promise<string | undefined>((resolve) => {
+    const dialog = get<HTMLDialogElement>('#move-dialog');
+    const heading = get('#move-heading');
+    const input = get<HTMLInputElement>('#move-search');
+    const list = get('#move-list');
+    if (!dialog || !input || !list) { resolve(undefined); return; }
+    if (heading) heading.textContent = title;
+    const pathsNow = folderPaths(collections);
+    const sorted = [...folders].sort((left, right) => (pathsNow.get(left.id) ?? '').localeCompare(pathsNow.get(right.id) ?? ''));
+    const everything: PickRow[] = [...base, ...sorted.map((folder) => ({ value: folder.id, label: folder.name, detail: pathsNow.get(folder.id) === folder.name ? undefined : pathsNow.get(folder.id), icon: 'folder' as const }))];
+    let rows: PickRow[] = [];
+    let active = 0;
+    const paint = () => {
+      const query = input.value.trim().toLowerCase();
+      rows = everything.filter((row) => `${row.label} ${row.detail ?? ''}`.toLowerCase().includes(query));
+      if (query && !everything.some((row) => row.label.toLowerCase() === query)) rows.push({ value: '', label: fill(text.createNamed, { v: input.value.trim() }), icon: 'folderPlus', create: input.value.trim() });
+      active = Math.min(active, Math.max(rows.length - 1, 0));
+      list.innerHTML = rows.length ? rows.map((row, index) => `<button type="button" role="option" class="pick-row" data-pick="${index}" aria-selected="${index === active}" tabindex="-1">${uiIcon(row.icon)}<span class="pick-text"><span>${escapeHtml(row.label)}</span>${row.detail ? `<small>${escapeHtml(row.detail)}</small>` : ''}</span></button>`).join('') : `<p class="pick-empty">${escapeHtml(text.noFoldersFound)}</p>`;
+      list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+    };
+    const finish = (value: string | undefined) => {
+      dialog.close();
+      input.removeEventListener('input', onInput);
+      input.removeEventListener('keydown', onKey);
+      list.removeEventListener('click', onClick);
+      dialog.removeEventListener('cancel', onCancel);
+      dialog.removeEventListener('click', onBackdrop);
+      resolve(value);
+    };
+    const choose = async (row: PickRow | undefined) => {
+      if (!row) return;
+      if (row.create === undefined) { finish(row.value); return; }
+      const response = await sendRuntime(port, 'collection-create', { name: row.create });
+      finish(response?.item?.id);
+    };
+    const onInput = () => { active = 0; paint(); };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (rows.length) active = (active + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+        paint();
+      }
+      if (event.key === 'Enter') { event.preventDefault(); void choose(rows[active]); }
+    };
+    const onClick = (event: Event) => {
+      const index = (event.target as HTMLElement).closest<HTMLElement>('[data-pick]')?.dataset.pick;
+      if (index !== undefined) void choose(rows[Number(index)]);
+    };
+    const onCancel = () => finish(undefined);
+    const onBackdrop = (event: Event) => { if (event.target === dialog) finish(undefined); };
+    input.value = '';
+    input.addEventListener('input', onInput);
+    input.addEventListener('keydown', onKey);
+    list.addEventListener('click', onClick);
+    dialog.addEventListener('cancel', onCancel);
+    dialog.addEventListener('click', onBackdrop);
+    paint();
+    dialog.showModal();
+    input.focus();
   });
-  const tagInScope = () => (scope.kind === 'tag' ? scope.tag : undefined);
-  get('#rename-tag')?.addEventListener('click', async () => {
-    const tag = tagInScope();
-    if (!tag) return;
+
+  const moveSelection = async (ids: string[]) => {
+    if (!ids.length) return;
+    const target = await pickFolder(fillCount(text.moveBookmarksTitle, ids.length), [{ value: UNFILED_TARGET, label: text.unfiled, icon: 'inbox' }], moveTargets(collections, undefined));
+    if (!target) return;
+    await load();
+    await moveIds(ids, target);
+  };
+
+  const moveFolder = async (folder: Collection) => {
+    const target = await pickFolder(fill(text.moveFolderTitle, { v: folder.name }), [{ value: TOP_TARGET, label: text.topLevelFolder, icon: 'layers' }], moveTargets(collections, folder.id));
+    if (!target) return;
+    await load();
+    await placeFolder(folder.id, target === TOP_TARGET ? undefined : target);
+  };
+
+  // ── Menus ──
+  const pointOf = (element: HTMLElement) => {
+    const box = element.getBoundingClientRect();
+    return { x: box.left, y: box.bottom + 4 };
+  };
+
+  const folderEntries = (folder: Collection): MenuEntry[] => {
+    const locked = isLockedFolder(folder);
+    const inside = liveBookmarks(bookmarks).filter((bookmark) => bookmark.collectionId === folder.id).map((bookmark) => bookmark.id);
+    return [
+      { id: 'open', label: text.open, icon: 'folderOpen', run: () => setScope({ kind: 'folder', id: folder.id }) },
+      { id: 'open-all', label: fill(text.openAllInFolder, { n: inside.length }), icon: 'external', disabled: !inside.length, run: () => openIds(inside) },
+      'separator',
+      { id: 'new-subfolder', label: text.newSubfolder, icon: 'folderPlus', run: () => createFolder(folder.id) },
+      { id: 'rename', label: text.renameFolder, icon: 'pencil', hint: 'F2', run: () => renameFolder(folder) },
+      { id: 'move', label: text.moveTo, icon: 'move', disabled: locked, run: () => moveFolder(folder) },
+      { id: 'use-as-bar', label: folder.toolbar ? text.barFolderLocked : text.useAsBar, icon: 'bookmark', disabled: folder.toolbar, run: () => useAsBar(folder) },
+      'separator',
+      { id: 'delete', label: text.deleteFolder, icon: 'trash', danger: true, disabled: locked, hint: 'Del', run: () => deleteFolder(folder) },
+    ];
+  };
+
+  const openFolderMenu = (id: string, origin: HTMLElement, point = pointOf(origin)) => {
+    const folder = folderById(id);
+    if (folder) menu.open(point, folderEntries(folder), text.folderMenu, origin);
+  };
+
+  const treeEntries = (): MenuEntry[] => [
+    { id: 'new-folder', label: text.newFolderHere, icon: 'folderPlus', run: () => createFolder() },
+    'separator',
+    { id: 'expand', label: text.expandAll, icon: 'expand', disabled: !collapsed.size, run: () => { collapsed.clear(); writeJson(COLLAPSED_KEY, []); renderSidebar(); } },
+    { id: 'collapse', label: text.collapseAll, icon: 'collapse', run: () => {
+      collections.filter((item) => !item.deletedAt && item.parentId).forEach((item) => { if (item.parentId) collapsed.add(item.parentId); });
+      writeJson(COLLAPSED_KEY, [...collapsed]);
+      renderSidebar();
+    } },
+  ];
+
+  const bookmarkEntries = (bookmark: Bookmark): MenuEntry[] => {
+    const openable = isHttpUrl(bookmark.url);
+    const copy: MenuEntry = { id: 'copy', label: text.copyLink, icon: 'link', run: async () => { await navigator.clipboard?.writeText(bookmark.url); say(text.linkCopied); } };
+    if (bookmark.deletedAt) return [{ id: 'restore', label: text.restore, icon: 'undo', run: () => restoreIds([bookmark.id]) }, copy];
+    return [
+      { id: 'open', label: text.openInTab, icon: 'external', disabled: !openable, run: () => { void sendRuntime(port, 'open-existing', { url: bookmark.url }); } },
+      copy,
+      'separator',
+      { id: 'edit', label: text.edit, icon: 'pencil', hint: 'E', run: () => { setCursor(bookmark.id, false); return switchEditor(bookmark.id); } },
+      { id: 'favorite', label: bookmark.favorite ? text.unfavorite : text.favorite, icon: 'star', hint: 'F', run: async () => { await sendRuntime(port, 'favorite', { id: bookmark.id, favorite: !bookmark.favorite }); await load(); } },
+      { id: 'move', label: text.moveTo, icon: 'move', run: () => moveSelection([bookmark.id]) },
+      'separator',
+      { id: 'delete', label: text.delete, icon: 'trash', danger: true, hint: 'Del', run: () => deleteIds([bookmark.id]) },
+    ];
+  };
+
+  const selectionEntries = (): MenuEntry[] => {
+    if (scope.kind === 'trash') return [{ id: 'restore', label: text.restore, icon: 'undo', run: () => restoreIds([...selection]) }];
+    return [
+      { id: 'open', label: text.openSelected, icon: 'external', run: () => openIds([...selection]) },
+      { id: 'move', label: text.moveTo, icon: 'move', run: () => moveSelection([...selection]) },
+      { id: 'tags', label: text.tagSelected, icon: 'tag', run: openTagDialog },
+      'separator',
+      { id: 'delete', label: text.deleteSelected, icon: 'trash', danger: true, run: () => deleteIds([...selection]) },
+    ];
+  };
+
+  const openBookmarkMenu = (id: string, origin: HTMLElement, point = pointOf(origin)) => {
+    const bookmark = bookmarks.find((item) => item.id === id);
+    if (!bookmark) return;
+    const many = selection.has(id) && selection.size > 1;
+    menu.open(point, many ? selectionEntries() : bookmarkEntries(bookmark), text.bookmarkMenu, origin);
+  };
+
+  const renameTag = async (tag: string) => {
     const next = parseTags(await askName(text.renameTag, tag) ?? '')[0];
     if (!next || next === tag) return;
     await editTags(liveBookmarks(bookmarks).filter((bookmark) => bookmark.tags.includes(tag)).map((bookmark) => bookmark.id), [next], [tag]);
-    setScope({ kind: 'tag', tag: next });
-  });
-  get('#delete-tag')?.addEventListener('click', async () => {
-    const tag = tagInScope();
-    if (!tag) return;
+    if (scope.kind === 'tag') setScope({ kind: 'tag', tag: next });
+  };
+  const deleteTag = async (tag: string) => {
     await editTags(liveBookmarks(bookmarks).filter((bookmark) => bookmark.tags.includes(tag)).map((bookmark) => bookmark.id), [], [tag]);
-    setScope({ kind: 'all' });
+    if (scope.kind === 'tag') setScope({ kind: 'all' });
+  };
+  const tagEntries = (tag: string): MenuEntry[] => [
+    { id: 'open', label: text.open, icon: 'tag', run: () => setScope({ kind: 'tag', tag }) },
+    { id: 'rename', label: text.renameTag, icon: 'pencil', run: () => renameTag(tag) },
+    'separator',
+    { id: 'delete', label: text.deleteTag, icon: 'trash', danger: true, run: () => deleteTag(tag) },
+  ];
+
+  // Right click, the Menu key and Shift+F10 all arrive here. Fields keep the browser's menu for paste and spelling.
+  root.addEventListener('contextmenu', (event) => {
+    const mouse = event as MouseEvent;
+    const target = mouse.target as HTMLElement;
+    if (get('dialog[open]') || isTyping(target)) return;
+    const box = target.getBoundingClientRect();
+    const point = mouse.clientX || mouse.clientY ? { x: mouse.clientX, y: mouse.clientY } : { x: box.left, y: box.bottom };
+    const folderId = target.closest<HTMLElement>('[data-folder-node]')?.dataset.folderNode ?? target.closest<HTMLElement>('.subfolder[data-select-folder]')?.dataset.selectFolder;
+    if (folderId) { event.preventDefault(); openFolderMenu(folderId, target, point); return; }
+    if (target.closest('#side-folders')) { event.preventDefault(); menu.open(point, treeEntries(), text.folderActions, target); return; }
+    const tag = target.closest<HTMLElement>('[data-select-tag]')?.dataset.selectTag;
+    if (tag) { event.preventDefault(); menu.open(point, tagEntries(tag), text.tagMenu, target); return; }
+    const card = target.closest<HTMLElement>('[data-bookmark-id]');
+    if (card?.dataset.bookmarkId) { event.preventDefault(); openBookmarkMenu(card.dataset.bookmarkId, card, point); }
   });
+
+  /** Tree keys. Returns true when the key was for the tree. */
+  const treeKey = (key: KeyboardEvent, target: HTMLElement): boolean => {
+    const id = target.dataset.selectFolder ?? '';
+    const folder = folderById(id);
+    if (!folder) return false;
+    const buttons = [...root.querySelectorAll<HTMLElement>('#folder-tree .tree-button')];
+    const index = buttons.indexOf(target);
+    if (key.key === 'ArrowDown' || key.key === 'ArrowUp') {
+      key.preventDefault();
+      buttons[index + (key.key === 'ArrowDown' ? 1 : -1)]?.focus();
+      return true;
+    }
+    if (key.key === 'ArrowLeft' || key.key === 'ArrowRight') {
+      const hasChildren = collections.some((item) => !item.deletedAt && item.parentId === id);
+      if (!hasChildren) return false;
+      key.preventDefault();
+      if (key.key === 'ArrowLeft') collapsed.add(id);
+      else collapsed.delete(id);
+      writeJson(COLLAPSED_KEY, [...collapsed]);
+      renderSidebar();
+      focusFolder(id);
+      return true;
+    }
+    if (key.key === 'F2') { key.preventDefault(); void renameFolder(folder); return true; }
+    if (key.key === 'Delete' || key.key === 'Backspace') { key.preventDefault(); void deleteFolder(folder); return true; }
+    return false;
+  };
+
+  get('#show-new-folder')?.addEventListener('click', () => { void createFolder(); });
+  get('#scope-more')?.addEventListener('click', () => {
+    const button = get('#scope-more');
+    if (!button) return;
+    const current: LibraryScope = scope;
+    if (current.kind === 'folder') openFolderMenu(current.id, button);
+    if (current.kind === 'tag') menu.open(pointOf(button), tagEntries(current.tag), text.tagMenu, button);
+  });
+  get('#tags-toggle')?.addEventListener('click', () => { tagsExpanded = !tagsExpanded; renderSidebar(); });
+  get('#toggle-theme')?.addEventListener('click', toggleTheme);
+
+  // ── New bookmark ──
+  const openAdd = (url = '') => {
+    const here: LibraryScope = scope;
+    const folder = get<HTMLSelectElement>('#add-folder');
+    if (folder) folder.innerHTML = `<option value="">${escapeHtml(text.unfiled)}</option>${collectionOptions(collections, here.kind === 'folder' ? here.id : '', language)}`;
+    const form = get<HTMLFormElement>('#add-form');
+    const field = get<HTMLInputElement>('#add-url');
+    if (field) field.value = url;
+    for (const id of ['#add-title', '#add-tags']) { const input = get<HTMLInputElement>(id); if (input) input.value = ''; }
+    const error = get('#add-error');
+    if (error) error.textContent = '';
+    if (!form) return;
+    openDialog('#add-dialog');
+    (url ? get('#add-title') : field)?.focus();
+  };
+  get('#add-bookmark')?.addEventListener('click', () => openAdd());
+  get('#add-cancel')?.addEventListener('click', () => get<HTMLDialogElement>('#add-dialog')?.close());
+  get('#add-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const error = get('#add-error');
+    const url = typedUrl(get<HTMLInputElement>('#add-url')?.value ?? '');
+    if (!isHttpUrl(url)) { if (error) error.textContent = text.invalidUrl; return; }
+    const response = await sendRuntime(port, 'add', {
+      url,
+      title: get<HTMLInputElement>('#add-title')?.value.trim() || undefined,
+      tags: parseTags(get<HTMLInputElement>('#add-tags')?.value ?? ''),
+      collectionId: get<HTMLSelectElement>('#add-folder')?.value || undefined,
+    });
+    if (!response?.ok) { if (error) error.textContent = text.invalidUrl; return; }
+    if (response.result?.kind === 'existing') { if (error) error.textContent = text.alreadyInLibrary; return; }
+    get<HTMLDialogElement>('#add-dialog')?.close();
+    const id = response.result?.bookmark?.id as string | undefined;
+    if (id) showUndo(text.addedBookmark, () => sendRuntime(port, 'delete', { ids: [id] }));
+    await load();
+  });
+  // Pasting an address anywhere on the page starts a new bookmark with it.
+  root.addEventListener('paste', (event) => {
+    if (get('dialog[open]') || isTyping(event.target)) return;
+    const value = (event as ClipboardEvent).clipboardData?.getData('text/plain').trim() ?? '';
+    if (/^https?:\/\/\S+$/i.test(value)) { event.preventDefault(); openAdd(value); }
+  });
+
+  // ── Command palette ──
+  let paletteHits: PaletteHit[] = [];
+  let paletteActive = 0;
+  const paletteCommands: Array<{ id: string; label: string; icon: UiIconName; run: () => void | Promise<void> }> = [
+    { id: 'new-bookmark', label: text.addBookmark, icon: 'bookmarkPlus', run: () => openAdd() },
+    { id: 'new-folder', label: text.newFolderHere, icon: 'folderPlus', run: () => createFolder() },
+    { id: 'theme', label: text.commandTheme, icon: 'moon', run: toggleTheme },
+    { id: 'shortcuts', label: text.shortcuts, icon: 'keyboard', run: () => { openDialog('#shortcut-dialog'); } },
+    { id: 'home', label: text.home, icon: 'home', run: () => { location.href = 'home.html'; } },
+    { id: 'settings', label: text.settings, icon: 'settings', run: () => { location.href = 'settings.html'; } },
+  ];
+  const paletteSource = () => ({
+    bookmarks,
+    collections,
+    commands: paletteCommands,
+    scopes: [
+      { scope: { kind: 'all' } as LibraryScope, label: text.allBookmarks },
+      { scope: { kind: 'favorites' } as LibraryScope, label: text.favorites },
+      { scope: { kind: 'recent' } as LibraryScope, label: text.recent },
+      { scope: { kind: 'unfiled' } as LibraryScope, label: text.unfiled },
+      { scope: { kind: 'duplicates' } as LibraryScope, label: text.duplicates },
+      { scope: { kind: 'trash' } as LibraryScope, label: text.trash },
+    ],
+  });
+  const groupOf = (hit: PaletteHit) => ({ scope: text.groupGo, folder: text.groupFolders, tag: text.groupTags, bookmark: text.groupBookmarks, command: text.groupCommands })[hit.kind];
+  const paletteRow = (hit: PaletteHit, index: number) => {
+    const option = (icon: string, label: string, detail = '') => `<button type="button" role="option" class="pick-row" id="palette-${index}" data-hit="${index}" aria-selected="${index === paletteActive}" tabindex="-1">${icon}<span class="pick-text"><span>${escapeHtml(label)}</span>${detail ? `<small>${escapeHtml(detail)}</small>` : ''}</span></button>`;
+    if (hit.kind === 'bookmark') return option(siteIcon(hit.bookmark.url, hit.bookmark.title, hit.bookmark.domain, hit.bookmark.faviconUrl), hit.bookmark.title, hit.bookmark.domain);
+    if (hit.kind === 'folder') return option(uiIcon('folder'), hit.label, hit.detail);
+    if (hit.kind === 'tag') return option(uiIcon('tag'), `#${hit.label}`, bookmarkCountLabel(hit.count, language));
+    if (hit.kind === 'scope') return option(uiIcon('layers'), hit.label);
+    return option(uiIcon(paletteCommands.find((item) => item.id === hit.id)?.icon ?? 'command'), hit.label);
+  };
+  const paintPalette = () => {
+    const list = get('#palette-list');
+    if (!list) return;
+    paletteHits = paletteResults(get<HTMLInputElement>('#palette-input')?.value ?? '', paletteSource());
+    paletteActive = Math.min(paletteActive, Math.max(paletteHits.length - 1, 0));
+    let group = '';
+    list.innerHTML = paletteHits.map((hit, index) => {
+      const next = groupOf(hit);
+      const head = next === group ? '' : `<p class="pick-group">${escapeHtml(next)}</p>`;
+      group = next;
+      return head + paletteRow(hit, index);
+    }).join('') || `<p class="pick-empty">${escapeHtml(text.commandNone)}</p>`;
+    list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+  };
+  const closePalette = () => get<HTMLDialogElement>('#palette')?.close();
+  const runHit = async (hit: PaletteHit | undefined) => {
+    if (!hit) return;
+    closePalette();
+    if (hit.kind === 'scope') setScope(hit.scope);
+    else if (hit.kind === 'folder') setScope({ kind: 'folder', id: hit.id });
+    else if (hit.kind === 'tag') setScope({ kind: 'tag', tag: hit.tag });
+    else if (hit.kind === 'command') await paletteCommands.find((item) => item.id === hit.id)?.run();
+    else if (isHttpUrl(hit.bookmark.url)) await sendRuntime(port, 'open-existing', { url: hit.bookmark.url });
+  };
+  const openPalette = () => {
+    const input = get<HTMLInputElement>('#palette-input');
+    if (!input) return;
+    input.value = '';
+    paletteActive = 0;
+    paintPalette();
+    openDialog('#palette');
+    input.focus();
+  };
+  get('#open-palette')?.addEventListener('click', openPalette);
+  get('#palette-input')?.addEventListener('input', () => { paletteActive = 0; paintPalette(); });
+  get('#palette-input')?.addEventListener('keydown', (event) => {
+    const key = event as KeyboardEvent;
+    if (key.isComposing) return;
+    if (key.key === 'ArrowDown' || key.key === 'ArrowUp') {
+      key.preventDefault();
+      if (paletteHits.length) paletteActive = (paletteActive + (key.key === 'ArrowDown' ? 1 : -1) + paletteHits.length) % paletteHits.length;
+      paintPalette();
+    }
+    if (key.key === 'Enter') { key.preventDefault(); void runHit(paletteHits[paletteActive]); }
+  });
+  get('#palette-list')?.addEventListener('click', (event) => {
+    const index = (event.target as HTMLElement).closest<HTMLElement>('[data-hit]')?.dataset.hit;
+    if (index !== undefined) void runHit(paletteHits[Number(index)]);
+  });
+  get('#palette')?.addEventListener('click', (event) => { if (event.target === get('#palette')) closePalette(); });
 
   // Long lists draw in pages as the user scrolls; bulk actions use the full result set, not the drawn rows.
   const list = results();
@@ -1195,7 +1696,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   // Changes made elsewhere (the popup, the browser's own bookmarks, a sync) show up on return.
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && loaded && !editingId) void load();
+      if (document.visibilityState === 'visible' && loaded && !editingId && !inlineEditing) void load();
     });
   }
   void load();

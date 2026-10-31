@@ -13,6 +13,7 @@ import {
   nextIndex,
   planWebSearch,
   renderBarEntries,
+  tileHue,
   visibleItemCount,
   type BarModel,
 } from '../ui/bar';
@@ -32,7 +33,7 @@ function globalRuntime(): RuntimePort {
 type PageRoot = ParentNode & EventTarget;
 
 const MAX_RESULTS = 8;
-const MAX_FAVORITES = 12;
+const MAX_FAVORITES = 16;
 const MAX_RECENT = 6;
 const MAX_FOLDERS = 8;
 
@@ -636,14 +637,19 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     const live = bookmarks.filter((bookmark) => !bookmark.deletedAt && !isSeparator(bookmark));
     const open = (bookmark: Bookmark) => (isHttpUrl(bookmark.url) ? ` href="${escapeHtml(bookmark.url)}"` : '');
     fillSection('home-favorites', live.filter((bookmark) => bookmark.favorite).slice(0, MAX_FAVORITES).map((bookmark) =>
-      `<a class="home-tile"${open(bookmark)} title="${escapeHtml(bookmark.title)}">${siteIcon(bookmark.url, bookmark.title, bookmark.domain, bookmark.faviconUrl)}<span>${escapeHtml(bookmark.title)}</span></a>`).join(''));
+      `<a class="home-tile"${open(bookmark)} title="${escapeHtml(bookmark.title)}"><span class="home-tile-icon">${siteIcon(bookmark.url, bookmark.title, bookmark.domain, bookmark.faviconUrl)}</span><span class="home-tile-label">${escapeHtml(bookmark.title)}</span></a>`).join(''));
     const recent = [...live].sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, MAX_RECENT);
     fillSection('home-recent', recent.map((bookmark) =>
       `<a class="home-row"${open(bookmark)}>${siteIcon(bookmark.url, bookmark.title, bookmark.domain, bookmark.faviconUrl)}<span class="home-row-text"><span class="home-row-title">${escapeHtml(bookmark.title)}</span><span class="home-row-meta">${escapeHtml(bookmark.domain)}</span></span><time>${escapeHtml(relativeTime(bookmark.createdAt, language))}</time></a>`).join(''));
+    const hour = new Date().getHours();
+    const greeting = root.querySelector<HTMLElement>('#home-greeting');
+    if (greeting) greeting.textContent = hour < 12 ? text.greetingMorning : hour < 18 ? text.greetingAfternoon : text.greetingEvening;
+    const summary = root.querySelector<HTMLElement>('#home-summary');
+    if (summary) summary.textContent = live.length ? fill(text.homeSummary, { n: live.length.toLocaleString(), f: collections.filter((item) => !item.deletedAt).length }) : '';
     const counts = folderCounts(bookmarks);
     const folders = live.length ? folderTree(collections).flatMap((node) => (node.toolbar ? node.children : [node])).slice(0, MAX_FOLDERS) : [];
     fillSection('home-folders', folders.map((folder) =>
-      `<a class="home-folder" href="library.html?folder=${encodeURIComponent(folder.id)}">${uiIcon('folder')}<span>${escapeHtml(folder.name)}</span><span class="home-count">${counts[folder.id] ?? 0}</span></a>`).join(''));
+      `<a class="home-folder" href="library.html?folder=${encodeURIComponent(folder.id)}"><span class="home-folder-icon" style="--tile-hue:${tileHue(folder.name)}">${uiIcon('folder')}</span><span>${escapeHtml(folder.name)}</span><span class="home-count">${counts[folder.id] ?? 0}</span></a>`).join(''));
   };
 
   const load = async () => {

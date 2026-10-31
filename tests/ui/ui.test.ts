@@ -81,15 +81,15 @@ describe('LumaMark UI state and documents', () => {
     expect(library).toContain('id="batch-actions" hidden');
     expect(library).toContain('id="batch-move" class="secondary"');
     expect(library).toContain('id="batch-delete" class="danger"');
-    expect(library).toContain('id="create-collection" class="secondary"');
-    expect(library).toContain('id="delete-folder" class="danger"');
+    expect(library).toContain('id="show-new-folder"');
+    expect(library).toContain('id="scope-more"');
     expect(library).toContain('id="editor" class="form-grid"');
     expect(library).toContain('id="decision-confirm" class="danger"');
     expect(library).toContain('id="decision-cancel" class="secondary"');
     for (const name of ['name="text"', 'name="tag"', 'name="domain"', 'name="from"', 'name="to"', 'name="favoriteOnly"', 'name="title"', 'name="url"', 'name="folder"', 'name="tags"', 'name="notes"', 'name="favorite"']) {
       expect(library).toContain(name);
     }
-    for (const id of ['id="tag"', 'id="domain"', 'id="from"', 'id="to"', 'id="favorite"', 'id="batch-collection"', 'id="results"', 'id="editor-title"', 'id="editor-url"', 'id="editor-folder"', 'id="editor-tags"', 'id="editor-notes"', 'id="editor-favorite"', 'id="editor-error"', 'id="editor-cancel"', 'id="decision"', 'id="decision-text"', 'id="library-status"', 'id="new-collection"']) {
+    for (const id of ['id="tag"', 'id="domain"', 'id="from"', 'id="to"', 'id="favorite"', 'id="results"', 'id="editor-title"', 'id="editor-url"', 'id="editor-folder"', 'id="editor-tags"', 'id="editor-notes"', 'id="editor-favorite"', 'id="editor-error"', 'id="editor-cancel"', 'id="decision"', 'id="decision-text"', 'id="library-status"']) {
       expect(library).toContain(id);
     }
   });
@@ -98,9 +98,9 @@ describe('LumaMark UI state and documents', () => {
     const settings = settingsDocument();
     expect(settings).toContain('id="sync-form" class="form-grid"');
     expect(settings).toContain('id="sync-now" class="secondary"');
-    expect(settings).toContain('id="export" class="secondary"');
+    expect(settings).toContain('id="export" class="secondary action-card"');
     expect(settings).toContain('id="save-toolbar" class="primary"');
-    expect(settings).toContain('id="import-html" class="secondary"');
+    expect(settings).toContain('id="import-html" class="secondary action-card"');
     expect(settings).toContain('class="check-line"');
     for (const id of ['id="toolbar-folder"', 'id="save-toolbar"', 'id="search-url"', 'id="save-search"', 'id="home-status"', 'id="webdav-url"', 'id="webdav-path"', 'id="webdav-user"', 'id="webdav-password"', 'id="auto-sync"', 'id="sync-status"', 'id="sync-metadata"', 'id="conflicts"', 'id="import-action"', 'id="import-html"', 'id="import-json"', 'id="export"', 'id="data-status"']) {
       expect(settings).toContain(id);

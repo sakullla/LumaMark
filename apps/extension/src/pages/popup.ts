@@ -3,7 +3,7 @@ import { popupDocument, collectionOptions, type RuntimeAction, type RuntimeMessa
 import { copyFor, detectUiLanguage, fill } from '../ui/copy';
 import { titleInitial, toolbarFolder } from '../ui/bar';
 import { escapeHtml } from '../ui/html';
-import { bindIconFallback } from '../ui/icons';
+import { bindIconFallback, uiIcon } from '../ui/icons';
 import { folderPaths, parseTags, tagCounts } from '../ui/library-model';
 
 export interface RuntimePort {
@@ -35,7 +35,7 @@ export function popupRuntimeMessage(action: RuntimeAction, payload?: unknown): R
     'get-search-engine': 'lumamark-get-search-engine', 'set-search-engine': 'lumamark-set-search-engine',
     'get-sync-config': 'lumamark-get-sync-config', 'set-auto-sync': 'lumamark-set-auto-sync',
     'native-status': 'lumamark-native-status', 'set-native-sync': 'lumamark-set-native-sync',
-    'collection-update': 'lumamark-collection-update', 'open-settings': 'lumamark-open-settings',
+    'collection-update': 'lumamark-collection-update', add: 'lumamark-add', 'open-settings': 'lumamark-open-settings',
   };
   return { type: runtimeTypes[action], ...(payload === undefined ? {} : { payload }) };
 }
@@ -49,6 +49,20 @@ export function popupStatus(kind: 'saving' | 'saved' | 'existing' | 'error' | 'u
 }
 
 const TAG_SUGGESTIONS = 6;
+const RECENT_FOLDERS_KEY = 'lumamark-recent-folders';
+const RECENT_FOLDERS = 3;
+
+function recentFolders(): string[] {
+  try {
+    const stored = JSON.parse(globalThis.localStorage?.getItem(RECENT_FOLDERS_KEY) ?? '[]') as unknown;
+    return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : [];
+  } catch { return []; }
+}
+
+function rememberFolder(id: string | undefined): void {
+  if (!id) return;
+  try { globalThis.localStorage?.setItem(RECENT_FOLDERS_KEY, JSON.stringify([id, ...recentFolders().filter((item) => item !== id)].slice(0, RECENT_FOLDERS * 2))); } catch { /* a convenience only */ }
+}
 
 /** Bind the save card to the background. The folder is one choice away; tags and notes stay behind More. */
 export function mountPopup(root: ParentNode = document, port: RuntimePort = globalRuntime()): void {
@@ -115,7 +129,27 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
     await loadFolders();
     const initial = toolbarFolder(collections)?.id ?? '';
     select.innerHTML = `${initial ? '' : `<option value="">${escapeHtml(text.topLevel)}</option>`}${collectionOptions(collections, initial, detectUiLanguage())}`;
+    paintRecentFolders();
+    select.addEventListener('change', paintRecentFolders);
   };
+
+  /** The last few folders stay one click away, which beats scrolling a long list on every save. */
+  const paintRecentFolders = () => {
+    const box = root.querySelector<HTMLElement>('#recent-folders');
+    const select = root.querySelector<HTMLSelectElement>('#save-folder');
+    if (!box || !select) return;
+    const alive = collections.filter((folder) => !folder.deletedAt);
+    const folders = recentFolders().map((id) => alive.find((folder) => folder.id === id)).filter((folder): folder is Collection => Boolean(folder)).slice(0, RECENT_FOLDERS);
+    box.hidden = !folders.length;
+    box.innerHTML = folders.map((folder) => `<button type="button" class="chip" data-recent-folder="${escapeHtml(folder.id)}" aria-pressed="${folder.id === select.value}">${uiIcon('folder')}<span>${escapeHtml(folder.name)}</span></button>`).join('');
+  };
+  root.querySelector<HTMLElement>('#recent-folders')?.addEventListener('click', (event) => {
+    const id = (event.target as HTMLElement).closest<HTMLElement>('[data-recent-folder]')?.dataset.recentFolder;
+    const select = root.querySelector<HTMLSelectElement>('#save-folder');
+    if (!id || !select) return;
+    select.value = id;
+    paintRecentFolders();
+  });
 
   const addSuggestion = (tag: string) => {
     const input = root.querySelector<HTMLInputElement>('#save-tags');
@@ -155,6 +189,10 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
     const titleInput = root.querySelector<HTMLInputElement>('#edit-title');
     if (titleInput) titleInput.value = bookmark.title ?? '';
     await loadFolders(bookmark.collectionId ?? '');
+    rememberFolder(bookmark.collectionId);
+    const where = folderPaths(collections).get(bookmark.collectionId ?? '');
+    const headline = root.querySelector<HTMLElement>('#saved-text');
+    if (headline) headline.textContent = where ? fill(text.savedInto, { v: where }) : text.savedHeadline;
   };
 
   const refresh = async () => {

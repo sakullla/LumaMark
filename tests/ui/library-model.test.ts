@@ -2,14 +2,22 @@ import { describe, expect, it } from 'vitest';
 import { makeBookmark, type Bookmark, type Collection } from '../../packages/domain/src/index';
 import { collectionOptions, defaultLibraryFilters, renderBookmarkCard, renderFolderTree, renderScopeNav } from '../../apps/extension/src/ui/index';
 import { bookmarkCountLabel, copyFor, fillCount } from '../../apps/extension/src/ui/copy';
+import { renderMenuEntries } from '../../apps/extension/src/ui/context-menu';
 import {
   domainCounts,
   duplicateGroups,
   extraDuplicateIds,
   folderDescendants,
+  folderFootprint,
   folderPaths,
+  folderTrail,
+  isLockedFolder,
   isUnfiled,
+  moveTargets,
+  paletteResults,
   parseTags,
+  placeMenu,
+  typedUrl,
   planReplace,
   rangeIds,
   scopedBookmarks,
@@ -160,5 +168,73 @@ describe('library markup', () => {
   it('does not repeat the bar label when the folder is already called that', () => {
     expect(collectionOptions([folder('bar', { name: 'Bookmarks bar', toolbar: true })])).toContain('>Bookmarks bar<');
     expect(collectionOptions([folder('bar', { name: 'Daily', toolbar: true })])).toContain('>Daily (Bookmarks bar)<');
+  });
+});
+
+describe('folder management', () => {
+  const stamp = '2026-01-01T00:00:00.000Z';
+  const item = (id: string, extra: Partial<Collection> = {}): Collection => ({ id, name: id, position: 0, toolbar: false, createdAt: stamp, updatedAt: stamp, revision: 1, ...extra });
+  const tree = [item('top'), item('kid', { parentId: 'top' }), item('leaf', { parentId: 'kid' }), item('side'), item('gone', { deletedAt: stamp })];
+  const mark = (id: string, collectionId?: string, extra: Partial<Bookmark> = {}) => ({ ...makeBookmark({ url: `https://${id}.example/`, title: id, collectionId }), ...extra });
+
+  it('counts everything a delete would touch, skipping what is already gone', () => {
+    const footprint = folderFootprint([mark('a', 'top'), mark('b', 'leaf'), mark('c', 'side'), mark('d', 'kid', { deletedAt: stamp })], tree, 'top');
+    expect(footprint.subfolders).toBe(2);
+    expect(footprint.bookmarkIds).toHaveLength(2);
+    expect([...footprint.folderIds].sort()).toEqual(['kid', 'leaf', 'top']);
+  });
+
+  it('never offers a folder as a destination inside itself', () => {
+    expect(moveTargets(tree, 'kid').map((folder) => folder.id)).toEqual(['top', 'side']);
+    expect(moveTargets(tree, undefined).map((folder) => folder.id)).toEqual(['top', 'kid', 'leaf', 'side']);
+  });
+
+  it('walks a breadcrumb and survives a loop in stored data', () => {
+    expect(folderTrail(tree, 'leaf').map((folder) => folder.id)).toEqual(['top', 'kid', 'leaf']);
+    expect(folderTrail([item('x', { parentId: 'y' }), item('y', { parentId: 'x' })], 'x')).toHaveLength(2);
+  });
+
+  it('locks the bar and the browser roots', () => {
+    expect(isLockedFolder(item('bar', { toolbar: true }))).toBe(true);
+    expect(isLockedFolder(item('root-menu'))).toBe(true);
+    expect(isLockedFolder(item('plain'))).toBe(false);
+  });
+
+  it('keeps a floating menu on screen', () => {
+    const view = { width: 800, height: 600 };
+    expect(placeMenu({ x: 100, y: 100 }, { width: 200, height: 300 }, view)).toEqual({ left: 100, top: 100 });
+    expect(placeMenu({ x: 790, y: 590 }, { width: 200, height: 300 }, view)).toEqual({ left: 590, top: 290 });
+    expect(placeMenu({ x: 5, y: 5 }, { width: 900, height: 700 }, view).left).toBe(8);
+  });
+
+  it('completes a bare domain and leaves everything else to validation', () => {
+    expect(typedUrl(' example.org/a ')).toBe('https://example.org/a');
+    expect(typedUrl('http://example.org')).toBe('http://example.org');
+    expect(typedUrl('just words')).toBe('just words');
+    expect(typedUrl('')).toBe('');
+  });
+
+  it('finds folders, tags, bookmarks and commands, with every word having to match', () => {
+    const source = {
+      bookmarks: [mark('rust-book', 'kid', { tags: ['rust'] })],
+      collections: [item('rust-notes', { name: 'Rust notes' })],
+      scopes: [{ scope: { kind: 'all' } as const, label: 'All bookmarks' }],
+      commands: [{ id: 'theme', label: 'Switch theme' }],
+    };
+    expect(paletteResults('', source).map((hit) => hit.kind)).toEqual(['command', 'scope']);
+    expect(paletteResults('rust', source).map((hit) => hit.kind)).toEqual(['folder', 'tag', 'bookmark']);
+    expect(paletteResults('rust zzz', source)).toEqual([]);
+    expect(paletteResults('theme', source).map((hit) => hit.kind)).toEqual(['command']);
+  });
+
+  it('gives every folder row a menu and an add button, and marks disabled and dangerous entries', () => {
+    const html = renderFolderTree([item('top')], null);
+    expect(html).toContain('data-folder-menu="top"');
+    expect(html).toContain('data-folder-add="top"');
+    const menu = renderMenuEntries([{ id: 'a', label: 'A & B', run() {} }, 'separator', { id: 'b', label: 'Gone', danger: true, disabled: true, hint: 'Del', run() {} }]);
+    expect(menu).toContain('A &amp; B');
+    expect(menu).toContain('role="separator"');
+    expect(menu).toContain('context-item is-danger" data-menu-item="b" disabled');
+    expect(menu).toContain('<kbd>Del</kbd>');
   });
 });

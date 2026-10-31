@@ -267,13 +267,21 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
     else link.removeAttribute('aria-current');
   });
   if (links[0]?.dataset.sectionLink) markSection(links[0].dataset.sectionLink);
+  const scroller = root.querySelector<HTMLElement>('.settings-scroll');
+  const atEnd = () => Boolean(scroller && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4);
   if (typeof IntersectionObserver !== 'undefined') {
     const observer = new IntersectionObserver((entries) => {
       const entry = entries.filter((item) => item.isIntersecting).sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
-      if (entry) markSection(entry.target.id);
-    }, { rootMargin: '-15% 0px -65% 0px' });
+      if (entry && !atEnd()) markSection(entry.target.id);
+    }, { root: scroller, rootMargin: '-15% 0px -65% 0px' });
     root.querySelectorAll('.settings-card').forEach((card) => observer.observe(card));
   }
+  // A short last section never reaches the band above, so the end of the page and a click decide for it.
+  scroller?.addEventListener('scroll', () => {
+    const last = links.at(-1)?.dataset.sectionLink;
+    if (last && atEnd()) markSection(last);
+  });
+  links.forEach((link) => link.addEventListener('click', () => { if (link.dataset.sectionLink) markSection(link.dataset.sectionLink); }));
 
   void loadForm().then(loadConflicts);
   void loadNative();
