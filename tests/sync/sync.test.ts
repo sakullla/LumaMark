@@ -61,6 +61,84 @@ class MemoryClient implements WebDavClient {
 }
 
 describe('WebDavSyncEngine', () => {
+  it('re-reads and re-merges a changed remote after a conditional write is rejected', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.autoSync = true;
+    await repository.put(bookmark('local', 'Local'));
+    const initial: SyncManifest = { format: 'lumamark-sync', schemaVersion: 2, generatedAt: '2024-01-01', deviceId: 'other', bookmarks: [], collections: [] };
+    let snapshot = { manifest: initial, etag: '"v1"' };
+    let reads = 0;
+    let writes = 0;
+    const client: WebDavClient = {
+      async read() { reads++; return structuredClone(snapshot); },
+      async write(manifest, etag) {
+        writes++;
+        if (writes === 1) {
+          snapshot = { manifest: { ...initial, bookmarks: [{ ...bookmark('remote', 'Added elsewhere'), collectionId: 'folder' }], collections: [collection('folder', 'Work')] }, etag: '"v2"' };
+          throw Object.assign(new Error('WebDAV write failed (412)'), { status: 412 });
+        }
+        expect(etag).toBe('"v2"');
+        expect(await repository.findById('remote')).toBeUndefined();
+        expect(await repository.listCollections()).toEqual([]);
+        snapshot = { manifest, etag: '"v3"' };
+        return { etag: '"v3"' };
+      },
+    };
+    expect((await new WebDavSyncEngine(repository, client).sync()).status).toBe('idle');
+    expect(reads).toBe(2);
+    expect(writes).toBe(2);
+    expect(snapshot.manifest.bookmarks.map((item) => item.id).sort()).toEqual(['local', 'remote']);
+    expect(await repository.findById('remote')).toMatchObject({ collectionId: 'folder' });
+    expect(repository.metadata.autoSync).toBe(true);
+  });
+
+  it('bounds repeated 412 retries without adopting rejected data or disabling auto sync', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.autoSync = true;
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put(bookmark('local', 'Local'));
+    let reads = 0;
+    let writes = 0;
+    const client: WebDavClient = {
+      async read() {
+        reads++;
+        return { etag: `"${reads}"`, manifest: { format: 'lumamark-sync', schemaVersion: 2, generatedAt: '2024-01-02', deviceId: 'other', bookmarks: [bookmark('remote', 'Remote')], collections: [] } };
+      },
+      async write(_manifest, etag) {
+        writes++;
+        expect(etag).toBe(`"${writes}"`);
+        throw Object.assign(new Error('WebDAV write failed (412)'), { status: 412 });
+      },
+    };
+    expect(await new WebDavSyncEngine(repository, client).sync()).toMatchObject({ status: 'error', retryable: true });
+    expect(reads).toBe(3);
+    expect(writes).toBe(3);
+    expect(await repository.findById('remote')).toBeUndefined();
+    expect(repository.metadata).toMatchObject({ autoSync: true, lastSyncAt: '2024-01-01T00:00:00.000Z' });
+  });
+
+  it('surfaces a genuine content conflict discovered on a 412 retry instead of overwriting it', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    await repository.put(bookmark('same', 'Local edit', 2, '2024-01-02T00:00:00.000Z'));
+    const manifest: SyncManifest = { format: 'lumamark-sync', schemaVersion: 2, generatedAt: '2024-01-01', deviceId: 'other', bookmarks: [bookmark('same', 'Original')], collections: [] };
+    let writes = 0;
+    const client: WebDavClient = {
+      async read() { return { manifest: structuredClone(manifest), etag: '"version"' }; },
+      async write() {
+        writes++;
+        manifest.bookmarks = [bookmark('same', 'Remote edit', 2, '2024-01-03T00:00:00.000Z')];
+        throw Object.assign(new Error('WebDAV write failed (412)'), { status: 412 });
+      },
+    };
+    const result = await new WebDavSyncEngine(repository, client).sync();
+    expect(result.status).toBe('conflict');
+    expect(result.conflicts[0].fields).toContain('title');
+    expect(writes).toBe(1);
+    expect((await repository.findById('same'))?.title).toBe('Local edit');
+    expect(manifest.bookmarks[0].title).toBe('Remote edit');
+  });
+
   it('does not upload an unchanged manifest again', async () => {
     const repository = new MemoryRepository();
     await repository.put(bookmark('same', 'Same'));

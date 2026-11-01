@@ -47,10 +47,17 @@ export interface SyncResult {
   mergedCount: number;
   conflicts: ConflictRecord[];
   error?: string;
+  /** A concurrent remote write can be retried without turning auto sync off. */
+  retryable?: boolean;
   lastSyncAt?: string;
 }
 
 export type ConflictResolution = 'local' | 'remote' | 'merged';
+
+function preconditionFailed(error: unknown): boolean {
+  return (error as { status?: number } | undefined)?.status === 412
+    || (error instanceof Error && error.message === 'WebDAV write failed (412)');
+}
 
 function bookmarkSignature(bookmark: Bookmark): string {
   const item = migrateBookmark(bookmark);
@@ -251,6 +258,10 @@ export class WebDavSyncEngine {
     const before = await this.repository.getSyncMetadata();
     const syncing: SyncMetadata = { ...before, status: 'syncing', error: undefined };
     await this.repository.setSyncMetadata(syncing);
+    return this.syncAttempt(before, 0);
+  }
+
+  private async syncAttempt(before: SyncMetadata, attempt: number): Promise<SyncResult> {
     try {
       const local = (await this.repository.list({ includeDeleted: true })).map((item) => migrateBookmark(item));
       const localCollections = (await this.repository.listCollections()).map((item) => migrateCollection(item));
@@ -427,14 +438,18 @@ export class WebDavSyncEngine {
       });
       return { status: 'conflict', mergedCount: merged.size, conflicts };
     } catch (error) {
+      const retryable = preconditionFailed(error);
+      // Rebuild the merge from a fresh snapshot and ETag. Never resend the old
+      // manifest or remove its precondition: that could overwrite another device.
+      if (retryable && attempt < 2) return this.syncAttempt(before, attempt + 1);
       const message = error instanceof Error ? error.message : String(error);
       await this.repository.setSyncMetadata({
         ...before,
         status: 'error',
-        autoSync: false,
+        autoSync: retryable ? before.autoSync : false,
         error: message,
       });
-      return { status: 'error', mergedCount: 0, conflicts: [], error: message };
+      return { status: 'error', mergedCount: 0, conflicts: [], error: message, retryable };
     }
   }
 }

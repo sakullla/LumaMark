@@ -35,8 +35,9 @@ import { placeItem } from './place';
 import { normalizeBridgeState, reconcileNativeBookmarks, type BridgeState, type NativeBookmarksApi, type ReconcileReport } from './native';
 import { probeWebDav } from './probe';
 
-function webDavClient(config: SyncConfig): WebDavClient {
+export function webDavClient(config: SyncConfig): WebDavClient {
   const endpoint = `${config.url.replace(/\/$/, '')}/${config.path.replace(/^\//, '')}`;
+  let remoteMissing = false;
   const headers = (): Record<string, string> => {
     const value = config.username ? `${config.username}:${config.password ?? ''}` : '';
     const result: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -45,14 +46,16 @@ function webDavClient(config: SyncConfig): WebDavClient {
   };
   return {
     async read() {
-      const response = await fetch(endpoint, { headers: headers() });
-      if (!response.ok) throw new Error(`WebDAV read failed (${response.status})`);
+      const response = await fetch(endpoint, { cache: 'no-store', headers: { ...headers(), 'Cache-Control': 'no-cache' } });
+      remoteMissing = response.status === 404;
+      if (!response.ok) throw Object.assign(new Error(`WebDAV read failed (${response.status})`), { status: response.status });
       const manifest = await response.json() as SyncManifest;
       return { manifest, etag: response.headers.get('etag') ?? undefined };
     },
     async write(manifest, etag) {
-      const response = await fetch(endpoint, { method: 'PUT', headers: { ...headers(), ...(etag ? { 'If-Match': etag } : {}) }, body: JSON.stringify(manifest) });
-      if (!response.ok) throw new Error(`WebDAV write failed (${response.status})`);
+      const condition: Record<string, string> = etag ? { 'If-Match': etag } : remoteMissing ? { 'If-None-Match': '*' } : {};
+      const response = await fetch(endpoint, { method: 'PUT', headers: { ...headers(), ...condition }, body: JSON.stringify(manifest) });
+      if (!response.ok) throw Object.assign(new Error(`WebDAV write failed (${response.status})`), { status: response.status });
       return { etag: response.headers.get('etag') ?? undefined };
     },
   };
@@ -373,7 +376,7 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
   };
   const sync = async () => {
     const config = syncConfig ?? await loadSyncConfig();
-    if (!config?.url) return { ok: false, status: 'error' as const, error: 'WebDAV is not configured' };
+    if (!config?.url) return { ok: false, status: 'error' as const, error: 'WebDAV is not configured', retryable: false };
     await reconcile();
     const engine = new WebDavSyncEngine(repository, webDavClient(config));
     let result = await engine.sync();
@@ -414,7 +417,7 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       return;
     }
     const result = await runSync();
-    if (result.status !== 'error') return;
+    if (result.status !== 'error' || result.retryable) return;
     syncConfig = { ...config, autoSync: false };
     await repository.setSyncConfig(syncConfig);
     const metadata = await repository.getSyncMetadata();
@@ -775,7 +778,7 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       const config = syncConfig ?? await loadSyncConfig();
       if (!config?.url) return { ok: false, status: 'error', error: 'WebDAV is not configured' };
       const result = await runSync();
-      if (result.status === 'error' && config.autoSync) {
+      if (result.status === 'error' && !result.retryable && config.autoSync) {
         syncConfig = { ...config, autoSync: false };
         await repository.setSyncConfig(syncConfig);
         const metadata = await repository.getSyncMetadata();

@@ -8,6 +8,8 @@ npm run verify
 
 验证脚本依次执行 TypeScript 类型检查、已配置的 lint、全量 Vitest 测试和扩展构建，并检查 Chrome、Edge（复用 Chromium 包）、Firefox、Safari macOS 所需文件。测试覆盖本地离线存储、URL 重复处理、HTML/JSON 导入导出、WebDAV 错误与冲突、集合层级、保存/撤销、筛选/视图和可访问 UI。
 
+WebDAV 实服回归为可选检查：设置 `LUMAMARK_WEBDAV_TEST_URL`（目录地址）、`LUMAMARK_WEBDAV_TEST_USER`、`LUMAMARK_WEBDAV_TEST_PASSWORD` 后运行 `npx vitest run tests/sync/webdav-live.test.ts`。测试创建随机命名的独立 JSON 文件，模拟第二个客户端抢先写入，验证 412 后重新读取与合并、保留书签目录、无变化时不重复上传，并在结束时删除测试文件；不会读写现有同步文件。凭据仅通过环境变量传入，不写入仓库。默认验证跳过此联网测试。
+
 发布前还需人工检查：
 
 1. 在四类桌面浏览器安装包中完成当前页保存、打开书签库、搜索和导出。

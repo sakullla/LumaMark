@@ -89,6 +89,10 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     menu.style.top = '';
     menu.style.left = '';
     menu.style.zIndex = '';
+    menu.style.minWidth = '';
+    menu.style.maxWidth = '';
+    menu.style.maxHeight = '';
+    menu.style.overflowY = '';
     if (home.parent.isConnected) {
       if (home.next && home.next.parentNode === home.parent) home.parent.insertBefore(menu, home.next);
       else home.parent.append(menu);
@@ -97,7 +101,7 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
   };
 
   const restoreLiftedMenus = () => {
-    for (const menu of [...liftedMenus.keys()]) restoreLiftedMenu(menu);
+    for (const menu of [...liftedMenus.keys()].reverse()) restoreLiftedMenu(menu);
   };
 
   // The bar clips its row. Open menus and full-title tips attach to #bar-region, which does not.
@@ -105,11 +109,35 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     if (typeof anchor.getBoundingClientRect !== 'function' || typeof layer.getBoundingClientRect !== 'function') return;
     const anchorRect = anchor.getBoundingClientRect();
     const nested = Boolean(anchor.closest('.folder-menu'));
-    const topEdge = nested ? anchorRect.top : anchorRect.bottom;
-    const leftEdge = nested ? anchorRect.right : anchorRect.left;
     const layerRect = layer.getBoundingClientRect();
+    const viewport = viewportWidth(layer);
+    const height = layer.ownerDocument?.documentElement.clientHeight || layer.ownerDocument?.defaultView?.innerHeight || 0;
+    const margin = 8;
     menu.style.position = 'absolute';
     menu.style.zIndex = '5';
+    menu.style.left = '0px';
+    menu.style.top = '0px';
+    if (viewport > 0) {
+      menu.style.minWidth = `min(13.5rem, ${Math.max(0, viewport - margin * 2)}px)`;
+      menu.style.maxWidth = `min(22rem, ${Math.max(0, viewport - margin * 2)}px)`;
+    }
+    if (height > 0) {
+      const available = nested ? height - margin * 2 : height - Math.max(margin, anchorRect.bottom) - margin;
+      menu.style.maxHeight = `${Math.max(0, available)}px`;
+      menu.style.overflowY = 'auto';
+    }
+    // offset sizes are unaffected by the opening scale animation.
+    const menuRect = menu.getBoundingClientRect();
+    const width = menu.offsetWidth || menuRect.width;
+    const menuHeight = menu.offsetHeight || menuRect.height;
+    let topEdge = nested ? anchorRect.top : anchorRect.bottom;
+    let leftEdge = nested ? anchorRect.right
+      : anchor.id === 'other-bookmarks' || anchor.id === 'overflow-button' ? anchorRect.right - width : anchorRect.left;
+    if (viewport > 0) {
+      if (nested && leftEdge + width > viewport - margin) leftEdge = anchorRect.left - width;
+      leftEdge = Math.max(margin, Math.min(leftEdge, viewport - width - margin));
+    }
+    if (height > 0) topEdge = Math.max(margin, Math.min(topEdge, height - menuHeight - margin));
     menu.style.top = `${topEdge - layerRect.top}px`;
     menu.style.left = `${leftEdge - layerRect.left}px`;
   };
@@ -121,7 +149,6 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
       positionLiftedMenu(menu, anchor, layer);
       return;
     }
-    if (!menu.closest('.bookmark-bar, .bar-items')) return;
     const parent = menu.parentElement;
     if (!parent || parent === layer) return;
     liftedMenus.set(menu, { parent, next: menu.nextSibling, anchor });
@@ -141,6 +168,9 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
   };
 
   const closeMenu = (menu: HTMLElement) => {
+    for (const [child, home] of [...liftedMenus]) {
+      if (child !== menu && menu.contains(home.anchor)) closeMenu(child);
+    }
     menu.querySelectorAll<HTMLElement>('.folder-menu').forEach((nested) => { nested.hidden = true; });
     menu.hidden = true;
     const anchor = liftedMenus.get(menu)?.anchor;
@@ -396,6 +426,15 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
       return;
     }
     const menu = target.closest<HTMLElement>('.folder-menu');
+    if (key === 'ArrowLeft' && menu) {
+      const anchor = liftedMenus.get(menu)?.anchor;
+      if (anchor?.closest('.folder-menu')) {
+        event.preventDefault();
+        closeMenu(menu);
+        anchor.focus();
+        return;
+      }
+    }
     const host = menu ?? bar()?.querySelector<HTMLElement>('.bar-items') ?? undefined;
     if (!host) return;
     if (key === 'ArrowRight' && target.matches('.folder > .bar-hit') && menu) {

@@ -47,6 +47,7 @@ class MiniElement extends MiniNode {
   style: Record<string, string> = {};
   listeners = new Map<string, Array<(event: MiniEvent) => void>>();
   clientWidth = 0;
+  clientHeight = 0;
   box: { top: number; left: number; right: number; bottom: number; width: number; height: number } | null = null;
   nowrapWidth = 0;
   constructor(doc: MiniDocument, readonly tagName: string) { super(doc); }
@@ -148,6 +149,15 @@ class MiniElement extends MiniNode {
     this.dispatchEvent(new MiniEvent('focusin', { bubbles: true, relatedTarget: prev }));
   }
   getBoundingClientRect(): { top: number; left: number; right: number; bottom: number; width: number; height: number } {
+    if (this.classList.contains('folder-menu') && this.box && this.style.position === 'absolute') {
+      const layer = this.closest('#bar-region');
+      const left = (layer?.box?.left ?? 0) + (Number.parseFloat(this.style.left) || 0);
+      const top = (layer?.box?.top ?? 0) + (Number.parseFloat(this.style.top) || 0);
+      const maxWidth = this.style.maxWidth?.match(/([\d.]+)px/)?.[1];
+      const width = Math.min(this.box.width, Number(maxWidth) || Infinity);
+      const height = Math.min(this.box.height, Number.parseFloat(this.style.maxHeight) || Infinity);
+      return { top, left, right: left + width, bottom: top + height, width, height };
+    }
     if (this.classList.contains('item-tooltip') && this.nowrapWidth > 0) {
       const wraps = this.style.whiteSpace === 'normal';
       const maxRaw = this.style.maxWidth;
@@ -405,6 +415,56 @@ function clippingAncestor(node: MiniElement | null): MiniElement | null {
 
 describe('bookmark bar full titles', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
+
+  it.each([640, 320])('keeps Other bookmarks and its scrollable submenus inside a %i px viewport', async (viewport) => {
+    const toolbar: Collection = { id: 'bar', name: 'Toolbar', position: 0, toolbar: true, createdAt: now, updatedAt: now, revision: 1 };
+    const folder = { ...toolbar, id: 'work', name: 'Work', toolbar: false };
+    const bookmark = makeBookmark({ url: 'https://nested.example/', title: 'Nested', collectionId: folder.id });
+    const doc = new MiniDocument();
+    doc.documentElement.clientWidth = viewport;
+    doc.documentElement.clientHeight = 240;
+    const region = doc.createElement('div');
+    region.id = 'bar-region';
+    region.box = { top: 8, left: 8, right: viewport - 8, bottom: 48, width: viewport - 16, height: 40 };
+    const bar = doc.createElement('nav');
+    bar.id = 'bookmark-bar';
+    bar.className = 'bookmark-bar';
+    region.append(bar);
+    doc.body.append(region);
+    vi.stubGlobal('document', doc);
+    mountHome(doc.body as never, { async sendMessage(message) {
+      if (message.type === 'lumamark-list') return { items: [bookmark] };
+      if (message.type === 'lumamark-list-collections') return { items: [toolbar, folder] };
+      return {};
+    } });
+    await vi.waitFor(() => expect(doc.body.querySelector('#other-bookmarks')).toBeTruthy());
+    const other = doc.body.querySelector('#other-bookmarks')!;
+    other.box = { top: 12, left: viewport - 88, right: viewport - 8, bottom: 44, width: 80, height: 32 };
+    const menu = other.parentElement!.querySelector(':scope > .folder-menu')!;
+    menu.box = { top: 0, left: 0, right: 260, bottom: 500, width: 260, height: 500 };
+    other.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+    const bounds = menu.getBoundingClientRect();
+    expect(bounds.right).toBeLessThanOrEqual(viewport - 8);
+    expect(bounds.left).toBeGreaterThanOrEqual(8);
+    expect(bounds.bottom).toBeLessThanOrEqual(232);
+    expect(menu.style.overflowY).toBe('auto');
+    const work = menu.querySelector('.folder > .bar-hit')!;
+    work.box = { top: 190, left: bounds.left + 6, right: bounds.right - 6, bottom: 220, width: bounds.width - 12, height: 30 };
+    const child = work.parentElement!.querySelector(':scope > .folder-menu')!;
+    child.box = { top: 0, left: 0, right: 230, bottom: 400, width: 230, height: 400 };
+    work.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+    expect(child.parentElement).toBe(region);
+    const childBounds = child.getBoundingClientRect();
+    expect(childBounds.left).toBeGreaterThanOrEqual(8);
+    expect(childBounds.right).toBeLessThanOrEqual(viewport - 8);
+    expect(childBounds.bottom).toBeLessThanOrEqual(232);
+    if (viewport === 640) expect(childBounds.right).toBeLessThanOrEqual(work.box.left);
+    other.dispatchEvent(new MiniEvent('click', { bubbles: true }));
+    expect(menu.hidden).toBe(true);
+    expect(child.hidden).toBe(true);
+    expect(child.parentElement).toBe(work.parentElement);
+    expect(region.children.filter((item) => item.classList.contains('folder-menu'))).toHaveLength(0);
+  });
 
   it('places the full title outside the clipped bar on hover and keyboard focus', async () => {
     const css = readFileSync('apps/extension/src/styles/main.css', 'utf8');
