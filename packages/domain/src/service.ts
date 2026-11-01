@@ -53,9 +53,24 @@ export class BookmarkService {
   async restore(id: string): Promise<Bookmark> {
     const current = await this.repository.findById(id);
     if (!current) throw new Error('Bookmark not found');
+    if (current.purgedAt) throw new Error('Bookmark was permanently deleted');
     const restored = { ...current, deletedAt: undefined, updatedAt: new Date().toISOString(), revision: current.revision + 1 };
     await this.repository.put(restored);
     return restored;
+  }
+
+  async purge(id: string): Promise<Bookmark> {
+    const current = await this.repository.findById(id);
+    if (!current?.deletedAt || current.purgedAt) throw new Error('Bookmark is not in Trash');
+    const now = new Date().toISOString();
+    // Keep a content-free deletion record so an offline device cannot resurrect it.
+    const purged: Bookmark = {
+      id, url: 'https://deleted.invalid/', title: '', domain: '', notes: '', tags: [],
+      favorite: false, position: 0, createdAt: current.createdAt,
+      updatedAt: now, deletedAt: current.deletedAt, purgedAt: now, revision: current.revision + 1,
+    };
+    await this.repository.put(purged);
+    return purged;
   }
 
   async list(query: BookmarkQuery = {}): Promise<Bookmark[]> {

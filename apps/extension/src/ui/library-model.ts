@@ -66,7 +66,7 @@ export function liveBookmarks(bookmarks: readonly Bookmark[]): Bookmark[] {
 }
 
 export function deletedBookmarks(bookmarks: readonly Bookmark[]): Bookmark[] {
-  return bookmarks.filter((bookmark) => bookmark.deletedAt && !isSeparator(bookmark));
+  return bookmarks.filter((bookmark) => bookmark.deletedAt && !bookmark.purgedAt && !isSeparator(bookmark));
 }
 
 export interface CountedName { name: string; count: number }
@@ -100,9 +100,12 @@ export function duplicateGroups(bookmarks: readonly Bookmark[]): Bookmark[][] {
 const keepScore = (bookmark: Bookmark) => (bookmark.favorite ? 4 : 0) + (bookmark.notes ? 2 : 0) + (bookmark.tags.length ? 1 : 0);
 
 /** The copies to delete so each group keeps one: favorites, then annotated, then most recently updated. */
-export function extraDuplicateIds(groups: readonly Bookmark[][]): string[] {
+export function extraDuplicateIds(groups: readonly Bookmark[][], collections: readonly Collection[] = []): string[] {
+  const alive = aliveFolderIds(collections);
   return groups.flatMap((group) => {
-    const ordered = [...group].sort((left, right) => keepScore(right) - keepScore(left) || right.updatedAt.localeCompare(left.updatedAt));
+    const ordered = [...group].sort((left, right) => keepScore(right) - keepScore(left)
+      || Number(!isUnfiled(right, alive)) - Number(!isUnfiled(left, alive))
+      || right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id));
     return ordered.slice(1).map((bookmark) => bookmark.id);
   });
 }

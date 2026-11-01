@@ -200,6 +200,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
       await renderConflictList(items, autoOpen);
       const metadata = await sendRuntime(port, 'sync-status');
       const value = metadata?.metadata;
+      if (value?.status === 'error' && value.error) setSync(statusText('error', String(value.error)));
       if (syncMetadata && value) syncMetadata.textContent = `${text.lastSync}: ${relativeTime(value.lastSyncAt, language)} · ${text.pending}: ${value.pendingChanges ?? 0}`;
       summarize(value);
     } catch { /* the background may still be starting */ }
@@ -267,7 +268,10 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
     void sendRuntime(port, 'set-auto-sync', { autoSync: autoSync.checked });
   });
 
-  root.querySelector<HTMLButtonElement>('#sync-now')?.addEventListener('click', async () => {
+  root.querySelector<HTMLButtonElement>('#sync-now')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    if (button.disabled) return;
+    button.disabled = true;
     setSync(statusText('syncing'));
     setSummary('busy', text.settingsSyncing);
     try {
@@ -275,12 +279,16 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
       if (response?.status === 'conflict') setSync(statusText('conflict'));
       else if (response?.status === 'error' || response?.ok === false) {
         const kind = classifyFailure(String(response?.error ?? ''));
-        setSync(kind && kind !== 'other' ? probeSentence(kind, language) : statusText('error'));
+        setSync(kind && kind !== 'other' ? probeSentence(kind, language) : statusText('error', String(response?.error ?? '')));
       } else setSync(statusText('synced'));
       await renderConflictList(response?.conflicts ?? [], true);
       await loadConflicts(true);
-    } catch {
-      setSync(statusText('error'));
+    } catch (error) {
+      setSync(statusText('error', error instanceof Error ? error.message : String(error)));
+    } finally {
+      button.disabled = false;
+      await loadNative();
+      await loadForm();
     }
   });
 

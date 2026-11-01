@@ -218,6 +218,7 @@ export function renderBookmarkCard(bookmark: Bookmark, language: UiLanguage = 'e
   const actions = bookmark.deletedAt
     ? `<button type="button" class="icon-button" data-action="restore" aria-label="${escapeHtml(text.restore)}" title="${escapeHtml(text.restore)}">${uiIcon('undo')}</button>`
     : `<button type="button" class="icon-button${bookmark.favorite ? ' is-on' : ''}" data-action="favorite" aria-label="${escapeHtml(favoriteLabel)}" title="${escapeHtml(favoriteLabel)}">${starIcon(bookmark.favorite)}</button>` +
+      `<button type="button" class="icon-button" data-action="copy" aria-label="${escapeHtml(text.copyLink)}" title="${escapeHtml(text.copyLink)}">${uiIcon('link')}</button>` +
       `<button type="button" class="icon-button" data-action="edit" aria-label="${escapeHtml(text.edit)}" title="${escapeHtml(text.edit)}">${pencilIcon()}</button>` +
       `<button type="button" class="icon-button danger" data-action="delete" aria-label="${escapeHtml(text.delete)}" title="${escapeHtml(text.delete)}">${trashIcon()}</button>` +
       `<button type="button" class="icon-button" data-action="more" aria-haspopup="menu" aria-label="${escapeHtml(text.bookmarkMenu)}" title="${escapeHtml(text.bookmarkMenu)}">${uiIcon('more')}</button>`;
@@ -328,7 +329,7 @@ export function renderSyncLine(phrase: HomeSyncPhrase, language: UiLanguage = 'e
   return `${status} <a href="settings.html">${escapeHtml(text.openSettings)}</a>`;
 }
 
-export type RuntimeAction = 'native-status' | 'set-native-sync' | 'save' | 'undo' | 'open-library' | 'open-home' | 'open-settings' | 'open-existing' | 'capture' | 'list' | 'list-collections' | 'update-existing' | 'copy-existing' | 'update' | 'delete' | 'restore' | 'favorite' | 'sync' | 'sync-configure' | 'export' | 'import' | 'list-conflicts' | 'resolve-conflict' | 'collection-create' | 'collection-update' | 'collection-delete' | 'collection-restore' | 'add' | 'sync-status' | 'reorder' | 'set-toolbar' | 'get-search-engine' | 'set-search-engine' | 'get-sync-config' | 'set-auto-sync';
+export type RuntimeAction = 'clean-duplicates' | 'purge-trash' | 'native-status' | 'set-native-sync' | 'save' | 'undo' | 'open-library' | 'open-home' | 'open-settings' | 'open-existing' | 'capture' | 'list' | 'list-collections' | 'update-existing' | 'copy-existing' | 'update' | 'delete' | 'restore' | 'favorite' | 'sync' | 'sync-configure' | 'export' | 'import' | 'list-conflicts' | 'resolve-conflict' | 'collection-create' | 'collection-update' | 'collection-delete' | 'collection-restore' | 'add' | 'sync-status' | 'reorder' | 'set-toolbar' | 'get-search-engine' | 'set-search-engine' | 'get-sync-config' | 'set-auto-sync';
 
 export interface RuntimeMessage { type: `lumamark-${RuntimeAction}`; payload?: unknown }
 
@@ -413,9 +414,9 @@ export function libraryDocument(collections: Collection[] = [], language: UiLang
     `<button type="button" id="batch-replace" class="icon-button" title="${escapeHtml(text.replaceAction)}" aria-label="${escapeHtml(text.replaceAction)}">${uiIcon('replace')}</button>` +
     `<button type="button" id="batch-open" class="icon-button" title="${escapeHtml(text.openSelected)}" aria-label="${escapeHtml(text.openSelected)}">${uiIcon('external')}</button>` +
     `<button type="button" id="batch-delete" class="danger">${uiIcon('trash')}<span>${escapeHtml(text.deleteSelected)}</span></button></div>` +
-    `<div class="batch-group" data-batch="trash" hidden><button type="button" id="batch-restore" class="primary">${escapeHtml(text.restore)}</button></div></div></div>` +
+    `<div class="batch-group" data-batch="trash" hidden><button type="button" id="batch-restore" class="primary">${escapeHtml(text.restore)}</button><button type="button" id="batch-purge" class="danger">${escapeHtml(text.permanentlyDelete)}</button></div></div></div>` +
 
-    `<form id="editor" class="form-grid" hidden aria-labelledby="editor-heading"><div class="editor-head"><span id="editor-icon" class="editor-icon" aria-hidden="true"></span><h2 id="editor-heading" class="dialog-title">${escapeHtml(text.editBookmark)}</h2><a id="editor-open" class="icon-link" target="_blank" rel="noreferrer" title="${escapeHtml(text.openPage)}" aria-label="${escapeHtml(text.openPage)}">${uiIcon('external')}</a><button type="button" id="editor-close" class="icon-button" title="${escapeHtml(text.close)}" aria-label="${escapeHtml(text.close)}">${uiIcon('x')}</button></div>` +
+    `<form id="editor" class="form-grid" hidden aria-labelledby="editor-heading"><div class="editor-head"><span id="editor-icon" class="editor-icon" aria-hidden="true"></span><h2 id="editor-heading" class="dialog-title">${escapeHtml(text.editBookmark)}</h2><button type="button" id="editor-copy" class="icon-button" title="${escapeHtml(text.copyLink)}" aria-label="${escapeHtml(text.copyLink)}">${uiIcon('link')}</button><a id="editor-open" class="icon-link" target="_blank" rel="noreferrer" title="${escapeHtml(text.openPage)}" aria-label="${escapeHtml(text.openPage)}">${uiIcon('external')}</a><button type="button" id="editor-close" class="icon-button" title="${escapeHtml(text.close)}" aria-label="${escapeHtml(text.close)}">${uiIcon('x')}</button></div>` +
     `<label for="editor-title">${escapeHtml(text.titleLabel)}</label><input id="editor-title" name="title" type="text"><label for="editor-url">${escapeHtml(text.urlLabel)}</label><input id="editor-url" name="url" type="url">` +
     `<label for="editor-folder">${escapeHtml(text.folder)}</label><select id="editor-folder" name="folder"><option value="">${escapeHtml(text.topLevel)}</option>${collectionOptions(collections, '', language)}</select>` +
     `<label for="editor-tags">${escapeHtml(text.tags)}</label><input id="editor-tags" name="tags" type="text" autocomplete="off"><div id="editor-tag-suggestions" class="tag-suggestions" hidden></div><label for="editor-notes">${escapeHtml(text.notes)}</label><textarea id="editor-notes" name="notes" rows="4"></textarea>` +
@@ -444,8 +445,9 @@ export function libraryDocument(collections: Collection[] = [], language: UiLang
     `<p id="library-status" class="toast" role="status" aria-live="polite"></p></main>`);
 }
 
-function cardHead(id: string, title: string, explain: string): string {
-  return `<div class="card-head"><div><h2 id="${id}">${escapeHtml(title)}</h2><p>${escapeHtml(explain)}</p></div></div>`;
+function cardHead(id: string, title: string, explain: string, icon?: UiIconName): string {
+  const badge = icon ? `<span class="card-head-icon" aria-hidden="true">${uiIcon(icon)}</span>` : '';
+  return `<div class="card-head">${badge}<div><h2 id="${id}">${escapeHtml(title)}</h2><p>${escapeHtml(explain)}</p></div></div>`;
 }
 
 const SEARCH_PRESETS = [
@@ -465,9 +467,9 @@ export function settingsDocument(language: UiLanguage = 'en'): string {
   return pageShell(language, `${text.settingsTitle} · LumaMark`, `<main class="settings-shell"><aside class="library-side settings-side">${appHeader(language, 'settings')}` +
     `<nav class="section-nav" aria-label="${escapeHtml(text.settingsSections)}">${section('native-section', text.nativeGroup, 'bookmark')}${section('sync-section', text.syncGroup, 'cloud')}${section('home-section', text.homeGroup, 'home')}${section('appearance-section', text.appearance, 'palette')}${section('data-section', text.dataGroup, 'file')}</nav></aside>` +
     `<div class="settings-scroll"><div class="settings-main"><header class="settings-intro"><h1 class="settings-title">${escapeHtml(text.settingsTitle)}</h1><p class="settings-lead">${escapeHtml(text.settingsLead)}</p></header>` +
-    `<section id="native-section" class="settings-card" aria-labelledby="native-heading">${cardHead('native-heading', text.nativeGroup, text.nativeExplain)}` +
+    `<section id="native-section" class="settings-card" aria-labelledby="native-heading">${cardHead('native-heading', text.nativeGroup, text.nativeExplain, 'bookmark')}` +
     `<label class="check-line switch-line" for="native-sync"><input id="native-sync" type="checkbox" role="switch"> <span>${escapeHtml(text.nativeToggle)}</span></label><p id="native-status" role="status" aria-live="polite"></p></section>` +
-    `<section id="sync-section" class="settings-card" aria-labelledby="sync-heading">${cardHead('sync-heading', text.syncGroup, text.syncExplain)}` +
+    `<section id="sync-section" class="settings-card" aria-labelledby="sync-heading">${cardHead('sync-heading', text.syncGroup, text.syncExplain, 'cloud')}` +
     `<div class="status-row"><div id="sync-summary" class="status-strip" data-state="idle"><span class="sync-dot" aria-hidden="true"></span><span id="sync-summary-text">${escapeHtml(text.syncNotSetUp)}</span></div><button type="button" id="sync-now" class="secondary">${uiIcon('sync')}<span>${escapeHtml(text.syncNow)}</span></button></div>` +
     `<p id="sync-metadata"></p>` +
     `<form id="sync-form" class="form-grid">` +
@@ -484,15 +486,15 @@ export function settingsDocument(language: UiLanguage = 'en'): string {
     `<div class="dialog-head"><div class="conflict-dialog-title-row"><h2 id="conflict-dialog-heading" class="dialog-title">${escapeHtml(text.conflictTitle)}</h2><span id="conflict-dialog-count" class="count-badge" hidden></span></div>` +
     `<button type="button" id="conflict-close" class="icon-button" title="${escapeHtml(text.close)}" aria-label="${escapeHtml(text.close)}">${uiIcon('x')}</button></div>` +
     `<section id="conflicts" aria-live="polite" aria-label="${escapeHtml(text.conflictTitle)}"></section></dialog></section>` +
-    `<section id="home-section" class="settings-card" aria-labelledby="home-heading">${cardHead('home-heading', text.homeGroup, text.homeExplain)}<div class="form-grid">` +
+    `<section id="home-section" class="settings-card" aria-labelledby="home-heading">${cardHead('home-heading', text.homeGroup, text.homeExplain, 'home')}<div class="form-grid">` +
     `<label for="toolbar-folder">${escapeHtml(text.toolbarFolderLabel)}</label><div class="field-with-action"><select id="toolbar-folder"></select><button id="save-toolbar" class="primary" type="button">${escapeHtml(text.save)}</button></div>` +
     `<label for="search-url">${escapeHtml(text.searchAddress)}</label><div class="field-with-action"><input id="search-url" type="url" inputmode="url" autocomplete="off"><button id="save-search" class="secondary" type="button">${escapeHtml(text.saveSearch)}</button></div>` +
     `<div class="preset-row" role="group" aria-label="${escapeHtml(text.searchPresets)}">${SEARCH_PRESETS.map((preset) => `<button type="button" class="chip" data-search-preset="${escapeHtml(preset.url)}">${escapeHtml(preset.name)}</button>`).join('')}</div>` +
     `<p id="home-status" role="status"></p></div></section>` +
-    `<section id="appearance-section" class="settings-card" aria-labelledby="appearance-heading">${cardHead('appearance-heading', text.appearance, text.appearanceExplain)}<div class="pref-list">` +
+    `<section id="appearance-section" class="settings-card" aria-labelledby="appearance-heading">${cardHead('appearance-heading', text.appearance, text.appearanceExplain, 'palette')}<div class="pref-list">` +
     `<div class="pref-row"><span class="pref-label" id="theme-label">${escapeHtml(text.theme)}</span><div class="segmented" role="radiogroup" aria-labelledby="theme-label">${radio('theme', 'system', text.themeSystem, 'monitor')}${radio('theme', 'light', text.themeLight, 'sun')}${radio('theme', 'dark', text.themeDark, 'moon')}</div></div>` +
     `<div class="pref-row"><span class="pref-label" id="accent-label">${escapeHtml(text.accent)}</span><div class="swatches" role="radiogroup" aria-labelledby="accent-label">${swatches}</div></div></div></section>` +
-    `<section id="data-section" class="settings-card" aria-labelledby="data-heading">${cardHead('data-heading', text.dataGroup, text.dataExplain)}<div class="form-grid">` +
+    `<section id="data-section" class="settings-card" aria-labelledby="data-heading">${cardHead('data-heading', text.dataGroup, text.dataExplain, 'file')}<div class="form-grid">` +
     `<label for="import-action">${escapeHtml(text.duplicateRule)}</label><select id="import-action">${duplicateOptions(language)}</select>` +
     `<div class="action-grid">${actionCard('import-html', 'upload', text.importHtml, text.importHtmlHelp)}${actionCard('import-json', 'file', text.importJson, text.importJsonHelp)}${actionCard('export', 'download', text.exportData, text.exportHelp)}</div>` +
     `<p id="data-status" role="status" aria-live="polite"></p></div></section></div></div></main>`);

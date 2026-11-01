@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Bookmark, BookmarkRepository, Collection, SyncMetadata } from '../../packages/domain/src/index';
+import { Bookmark, BookmarkRepository, BookmarkService, Collection, SyncMetadata } from '../../packages/domain/src/index';
 import { pruneNonConflicts, SyncRepository, SyncManifest, WebDavClient, WebDavSyncEngine } from '../../packages/sync/src/index';
 
 function bookmark(id: string, title: string, revision = 1, updatedAt = '2024-01-01T00:00:00.000Z', position = 0): Bookmark {
@@ -61,6 +61,33 @@ class MemoryClient implements WebDavClient {
 }
 
 describe('WebDavSyncEngine', () => {
+  it('does not upload an unchanged manifest again', async () => {
+    const repository = new MemoryRepository();
+    await repository.put(bookmark('same', 'Same'));
+    const client = new MemoryClient();
+    const engine = new WebDavSyncEngine(repository, client);
+    expect((await engine.sync()).status).toBe('idle');
+    client.failWrite = true;
+    expect((await engine.sync()).status).toBe('idle');
+  });
+
+  it('keeps permanent deletion content-free across stale sync copies and rejects restore', async () => {
+    const repository = new MemoryRepository();
+    const original = { ...bookmark('gone', 'Private title'), notes: 'Private note', deletedAt: '2024-01-02T00:00:00.000Z' };
+    await repository.put(original);
+    const service = new BookmarkService(repository);
+    await service.purge(original.id);
+    await expect(service.restore(original.id)).rejects.toThrow('permanently deleted');
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync', schemaVersion: 2, generatedAt: original.updatedAt, deviceId: 'remote',
+      bookmarks: [{ ...original, deletedAt: undefined, revision: 100 }], collections: [],
+    };
+    expect((await new WebDavSyncEngine(repository, client).sync()).status).toBe('idle');
+    expect(client.snapshot.manifest?.bookmarks[0]).toMatchObject({ title: '', notes: '', url: 'https://deleted.invalid/' });
+    expect(client.snapshot.manifest?.bookmarks[0].purgedAt).toBeTruthy();
+  });
+
   const collection = (
     id: string,
     name: string,

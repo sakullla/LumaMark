@@ -68,6 +68,7 @@ function bookmarkSignature(bookmark: Bookmark): string {
     item.createdAt,
     item.updatedAt,
     item.deletedAt ?? null,
+    item.purgedAt ?? null,
     item.revision,
   ]);
 }
@@ -111,6 +112,9 @@ function newerCollection(left: Collection, right: Collection): Collection {
 function newerBookmark(left: Bookmark, right: Bookmark, collections?: ReadonlyMap<string, Collection>): Bookmark {
   const normalizedLeft = migrateBookmark(left);
   const normalizedRight = migrateBookmark(right);
+  if (normalizedLeft.purgedAt || normalizedRight.purgedAt) {
+    return (normalizedRight.purgedAt ?? '') > (normalizedLeft.purgedAt ?? '') ? normalizedRight : normalizedLeft;
+  }
   if (Boolean(normalizedLeft.deletedAt) !== Boolean(normalizedRight.deletedAt)) {
     return normalizedLeft.deletedAt ? normalizedLeft : normalizedRight;
   }
@@ -395,7 +399,12 @@ export class WebDavSyncEngine {
         for (const item of pendingBookmarks) await this.repository.put(item);
       };
       if (!conflicts.length) {
-        const written = await this.client.write(manifest, remoteSnapshot.etag);
+        const remoteAlreadyMatches = remoteSnapshot.manifest?.schemaVersion === CURRENT_SCHEMA_VERSION
+          && !pendingBookmarks.length && !pendingCollections.length
+          && remote.length === merged.size && remoteCollections.length === mergedCollections.size
+          && remote.every((item) => equalBookmark(item, merged.get(item.id)!))
+          && remoteCollections.every((item) => equalCollection(item, mergedCollections.get(item.id)!));
+        if (!remoteAlreadyMatches) await this.client.write(manifest, remoteSnapshot.etag);
         await persistAdopted();
         const metadata: SyncMetadata = {
           ...before,
@@ -405,7 +414,7 @@ export class WebDavSyncEngine {
           error: undefined,
         };
         await this.repository.setSyncMetadata(metadata);
-        return { status: 'idle', mergedCount: merged.size, conflicts: [], lastSyncAt: written.etag ? now : now };
+        return { status: 'idle', mergedCount: merged.size, conflicts: [], lastSyncAt: now };
       }
 
       // Bookmark conflicts are not published. Unrelated remote records still converge locally.

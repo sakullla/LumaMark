@@ -27,6 +27,7 @@ export function popupRuntimeMessage(action: RuntimeAction, payload?: unknown): R
     capture: 'lumamark-capture', list: 'lumamark-list', 'list-collections': 'lumamark-list-collections',
     'update-existing': 'lumamark-update-existing', 'copy-existing': 'lumamark-copy-existing',
     update: 'lumamark-update', delete: 'lumamark-delete', restore: 'lumamark-restore',
+    'clean-duplicates': 'lumamark-clean-duplicates', 'purge-trash': 'lumamark-purge-trash',
     favorite: 'lumamark-favorite', sync: 'lumamark-sync', 'sync-configure': 'lumamark-sync-configure',
     export: 'lumamark-export', import: 'lumamark-import', 'list-conflicts': 'lumamark-list-conflicts',
     'resolve-conflict': 'lumamark-resolve-conflict', 'collection-create': 'lumamark-collection-create',

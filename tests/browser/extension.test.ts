@@ -479,6 +479,31 @@ describe('browser adapter', () => {
     expect(await send({ type: 'lumamark-add', payload: { url: 'javascript:alert(1)' } })).toEqual({ ok: false, error: 'invalid-url' });
   });
 
+  it('keeps one copy per URL even when cleanup requests every selected id, and purges only Trash', async () => {
+    const repository = new IndexedDbRepository(`lumamark-clean-${crypto.randomUUID()}`);
+    const stamp = new Date().toISOString();
+    await repository.putCollection({ id: 'folder', name: 'Work', position: 0, toolbar: false, createdAt: stamp, updatedAt: stamp, revision: 1 });
+    const folderCopy = makeBookmark({ url: 'https://same.example/', title: 'Filed', collectionId: 'folder' });
+    const looseCopy = makeBookmark({ url: 'https://same.example/', title: 'Loose' });
+    const unique = makeBookmark({ url: 'https://unique.example/', title: 'Unique' });
+    for (const item of [folderCopy, looseCopy, unique]) await repository.put(item);
+    let listener: any;
+    startBackground({ runtime: { onMessage: { addListener: (callback: any) => { listener = callback; } } } } as never, repository);
+    const send = (type: string, payload: unknown) => new Promise<any>((resolve) => listener({ type, payload }, {}, resolve));
+    const ids = [folderCopy.id, looseCopy.id, unique.id];
+    const cleaned = await send('lumamark-clean-duplicates', { ids });
+    expect(cleaned).toMatchObject({ ok: true, deleted: 1, kept: 1 });
+    expect((await repository.list()).map((item) => item.id).sort()).toEqual([folderCopy.id, unique.id].sort());
+    expect((await send('lumamark-clean-duplicates', { ids })).deleted).toBe(0);
+    expect(await send('lumamark-undo', { token: cleaned.undoToken })).toMatchObject({ ok: true });
+    expect(await repository.list()).toHaveLength(3);
+    await send('lumamark-clean-duplicates', { ids });
+    expect(await send('lumamark-purge-trash', { ids })).toMatchObject({ ok: true, purged: 1 });
+    expect((await repository.findById(looseCopy.id))?.purgedAt).toBeTruthy();
+    expect(await repository.list()).toHaveLength(2);
+    expect(await send('lumamark-restore', { ids: [looseCopy.id] })).toMatchObject({ ok: false });
+  });
+
   it('probes WebDAV, omits the password, and keeps the search address out of the sync manifest', async () => {
     const repository = new IndexedDbRepository(`lumamark-probe-${crypto.randomUUID()}`);
     const kept = makeBookmark({ url: 'https://kept.example/a', title: 'Kept' });

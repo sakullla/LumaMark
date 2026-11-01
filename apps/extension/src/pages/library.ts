@@ -457,7 +457,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     const replace = get('#open-replace');
     if (replace) replace.hidden = scope.kind === 'trash' || !visible.length;
 
-    // Bulk tools differ in Trash: the only thing to do there is bring bookmarks back.
+    // Trash offers restore and permanent deletion instead of editing tools.
     root.querySelectorAll<HTMLElement>('[data-batch]').forEach((group) => { group.hidden = (group.dataset.batch === 'trash') !== (scope.kind === 'trash'); });
 
     const editorSelect = get<HTMLSelectElement>('#editor-folder');
@@ -472,7 +472,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
         banner.innerHTML = `<div><strong>${escapeHtml(fill(text.duplicatesBanner, { groups: groups.length, extra }))}</strong><p>${escapeHtml(text.duplicatesHelp)}</p></div><button type="button" class="primary" data-action="clean-duplicates">${escapeHtml(text.duplicatesAction)}</button>`;
       } else if (scope.kind === 'trash' && visible.length) {
         banner.hidden = false;
-        banner.innerHTML = `<div><p>${escapeHtml(text.trashHelp)}</p></div><button type="button" class="secondary" data-action="restore-all">${escapeHtml(text.restoreAll)}</button>`;
+        banner.innerHTML = `<div><p>${escapeHtml(text.trashHelp)}</p></div><div class="button-row"><button type="button" class="secondary" data-action="restore-all">${escapeHtml(text.restoreAll)}</button><button type="button" class="danger" data-action="empty-trash">${escapeHtml(text.emptyTrash)}</button></div>`;
       } else {
         banner.hidden = true;
         banner.innerHTML = '';
@@ -710,6 +710,12 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   });
   get('#editor-cancel')?.addEventListener('click', closeEditor);
   get('#editor-close')?.addEventListener('click', closeEditor);
+  get('#editor-copy')?.addEventListener('click', async () => {
+    const url = editorField<HTMLInputElement>('url')?.value ?? '';
+    if (!url) return;
+    await navigator.clipboard?.writeText(url);
+    say(text.linkCopied);
+  });
   get('#editor-delete')?.addEventListener('click', async () => {
     const id = editingId;
     if (!id) return;
@@ -719,6 +725,25 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   get('#editor-tags')?.addEventListener('input', (event) => suggestTags(get('#editor-tag-suggestions'), (event.target as HTMLInputElement).value));
 
   // ── Bulk actions ──
+  const cleanDuplicates = async () => {
+    const ids = extraDuplicateIds(groups, collections);
+    if (!ids.length) return;
+    if (await decide(fill(text.duplicatesConfirm, { groups: groups.length, extra: ids.length }), { title: text.duplicatesAction, confirm: text.duplicatesAction }) !== 'confirm') return;
+    const response = await sendRuntime(port, 'clean-duplicates', { ids });
+    if (response?.ok) {
+      showUndo(fill(text.duplicatesCleaned, { n: response.deleted }), () => sendRuntime(port, 'undo', { token: response.undoToken }));
+      clearSelection();
+    } else say(text.notSaved);
+    await load();
+  };
+
+  const purgeIds = async (ids: string[]) => {
+    if (!ids.length || !await ask(fill(text.purgeConfirm, { n: ids.length }), text.permanentlyDelete)) return;
+    const response = await sendRuntime(port, 'purge-trash', { ids });
+    say(response?.ok ? fill(text.purgedCount, { n: response.purged }) : text.notSaved);
+    await load();
+  };
+
   async function deleteIds(ids: string[]) {
     if (!ids.length) return;
     if (ids.length >= CONFIRM_DELETE_AT && !await ask(text.confirmDeleteBookmark)) return;
@@ -768,6 +793,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   get('#batch-all')?.addEventListener('click', selectAll);
   get('#batch-delete')?.addEventListener('click', () => { void deleteIds([...selection]); });
   get('#batch-restore')?.addEventListener('click', () => { void restoreIds([...selection]); });
+  get('#batch-purge')?.addEventListener('click', () => { void purgeIds([...selection]); });
   get('#batch-open')?.addEventListener('click', () => { void openIds([...selection]); });
   get('#batch-move')?.addEventListener('click', () => { void moveSelection([...selection]); });
   get('#batch-favorite')?.addEventListener('click', () => {
@@ -908,7 +934,8 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   };
 
   const actions: Record<string, () => void | Promise<void>> = {
-    'clean-duplicates': () => deleteIds(extraDuplicateIds(groups)),
+    'clean-duplicates': cleanDuplicates,
+    'empty-trash': () => purgeIds(deletedBookmarks(bookmarks).map((bookmark) => bookmark.id)),
     'add-bookmark': () => openAdd(),
     'restore-all': () => restoreIds(visible.map((bookmark) => bookmark.id)),
     'clear-filters': () => { form?.reset(); },
@@ -993,6 +1020,14 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
       const bookmark = bookmarks.find((item) => item.id === id);
       await sendRuntime(port, 'favorite', { id, favorite: !bookmark?.favorite });
       await load();
+      return;
+    }
+    if (action === 'copy') {
+      const bookmark = bookmarks.find((item) => item.id === id);
+      if (bookmark?.url) {
+        await navigator.clipboard?.writeText(bookmark.url);
+        say(text.linkCopied);
+      }
       return;
     }
     if (action === 'edit') { setCursor(id, false); await switchEditor(id); return; }

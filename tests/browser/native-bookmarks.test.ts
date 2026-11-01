@@ -342,6 +342,58 @@ describe('native bookmark bridge: store removals', () => {
 });
 
 describe('background with browser bookmarks', () => {
+  it('coalesces overlapping sync requests and keeps the remote folder tree', async () => {
+    const native = new FakeNative('chrome');
+    const local: Record<string, unknown> = {};
+    const repository = new IndexedDbRepository(`sync-overlap-${crypto.randomUUID()}`);
+    await repository.setSyncConfig({ key: 'sync-config', url: 'https://dav.example', path: 'bookmarks.json', autoSync: false });
+    let listener: any;
+    startBackground({
+      tabs: { query: async () => [] }, bookmarks: native,
+      storage: { local: { get: async (key: string) => ({ [key]: structuredClone(local[key]) }), set: async (items: Record<string, unknown>) => { Object.assign(local, structuredClone(items)); } } },
+      runtime: { onMessage: { addListener: (callback: any) => { listener = callback; } } },
+    }, repository);
+    const send = (type: string) => new Promise<any>((resolve) => listener({ type }, {}, resolve));
+    await vi.waitFor(() => expect(local.nativeBridge).toBeTruthy());
+    const stamp = '2024-01-01T00:00:00.000Z';
+    let manifest = {
+      format: 'lumamark-sync', schemaVersion: 2, generatedAt: stamp, deviceId: 'remote',
+      collections: [
+        { id: 'parent', name: 'Work', position: 0, toolbar: false, createdAt: stamp, updatedAt: stamp, revision: 1 },
+        { id: 'child', parentId: 'parent', name: 'Docs', position: 0, toolbar: false, createdAt: stamp, updatedAt: stamp, revision: 1 },
+      ],
+      bookmarks: [makeBookmark({ url: 'https://docs.example/', title: 'Docs', collectionId: 'child' }, stamp)],
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let reads = 0;
+    const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        manifest = JSON.parse(String(init.body));
+        return new Response('{}');
+      }
+      reads += 1;
+      await gate;
+      return Response.json(manifest);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const first = send('lumamark-sync');
+      await vi.waitFor(() => expect(reads).toBe(1));
+      const second = send('lumamark-sync');
+      // Let the second request reach the same blocked network operation.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      release();
+      expect((await Promise.all([first, second])).map((result) => result.status)).toEqual(['idle', 'idle']);
+      expect(reads).toBe(1);
+      expect(native.shape(native.other)).toEqual([{ Work: [{ Docs: ['Docs'] }] }]);
+      expect((await repository.list()).map((item) => item.collectionId)).toEqual(['child']);
+      await send('lumamark-sync');
+      expect(await repository.list()).toHaveLength(1);
+      expect(native.shape(native.other)).toEqual([{ Work: [{ Docs: ['Docs'] }] }]);
+    } finally { release(); vi.unstubAllGlobals(); }
+  });
+
   it('imports the bookmarks bar, mirrors saves and undo, and follows browser edits', async () => {
     const native = new FakeNative('chrome');
     native.add(native.bar, 'GitHub', 'https://github.com/');

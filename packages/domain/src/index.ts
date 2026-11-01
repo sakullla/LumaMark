@@ -17,6 +17,8 @@ export interface Bookmark {
   createdAt: string;
   updatedAt: string;
   deletedAt?: string;
+  /** Content was permanently removed; retain identity to propagate deletion. */
+  purgedAt?: string;
   revision: number;
 }
 
@@ -201,6 +203,7 @@ export function conflictFields(
   } = {},
 ): ConflictField[] {
   if (!left || !right) return [];
+  if (left.purgedAt || right.purgedAt) return [];
   const leftDeleted = Boolean(left.deletedAt);
   const rightDeleted = Boolean(right.deletedAt);
   if (leftDeleted && rightDeleted) return [];

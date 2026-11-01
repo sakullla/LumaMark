@@ -30,7 +30,7 @@ import {
 } from '../../../../packages/browser/src/index';
 import { copyFor, languageFromApi, notificationCopy } from '../ui/copy';
 import { DEFAULT_SEARCH_URL, isHttpUrl, nextSiblingPosition, normalizeSearchUrl, toolbarFolder } from '../ui/bar';
-import { folderDescendants } from '../ui/library-model';
+import { deletedBookmarks, duplicateGroups, extraDuplicateIds, folderDescendants } from '../ui/library-model';
 import { placeItem } from './place';
 import { normalizeBridgeState, reconcileNativeBookmarks, type BridgeState, type NativeBookmarksApi, type ReconcileReport } from './native';
 import { probeWebDav } from './probe';
@@ -326,7 +326,13 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
 
   // ── browser bookmarks bridge ──
   const nativeApi: NativeBookmarksApi | undefined = api.bookmarks;
-  let nativeChain: Promise<unknown> = Promise.resolve();
+  // A sync snapshot, its adoption, and native reconciliation must not overlap.
+  let dataChain: Promise<unknown> = Promise.resolve();
+  const enqueueData = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = dataChain.then(work, work);
+    dataChain = run.catch(() => undefined);
+    return run;
+  };
   let nativeTimer: ReturnType<typeof setTimeout> | undefined;
   let pushTimer: ReturnType<typeof setTimeout> | undefined;
   let lastNative: { at?: string; report?: ReconcileReport; error?: string } = {};
@@ -346,40 +352,44 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
     },
     save: async (state: BridgeState) => { await api.storage?.local.set({ [NATIVE_STATE_KEY]: state }); },
   };
-  /** Run one reconcile pass after any pass already running. */
-  const reconcileNow = (): Promise<ReconcileReport | undefined> => {
-    const run = nativeChain.then(async () => {
-      if (!nativeApi || !(await nativeEnabled())) return undefined;
-      try {
-        const report = await reconcileNativeBookmarks(nativeApi, store, bridgeStore);
-        lastNative = { at: new Date().toISOString(), report, error: report.errors[0] };
-        if (report.repoChanges) schedulePush();
-        return report;
-      } catch (error) {
-        lastNative = { ...lastNative, error: error instanceof Error ? error.message : String(error) };
-        return undefined;
-      }
-    });
-    nativeChain = run.catch(() => undefined);
-    return run;
+  /** Called while holding the shared data queue. */
+  const reconcile = async (): Promise<ReconcileReport | undefined> => {
+    if (!nativeApi || !(await nativeEnabled())) return undefined;
+    try {
+      const report = await reconcileNativeBookmarks(nativeApi, store, bridgeStore);
+      lastNative = { at: new Date().toISOString(), report, error: report.errors[0] };
+      if (report.repoChanges) schedulePush();
+      return report;
+    } catch (error) {
+      lastNative = { ...lastNative, error: error instanceof Error ? error.message : String(error) };
+      return undefined;
+    }
   };
+  const reconcileNow = () => enqueueData(reconcile);
   const queueReconcile = (delay = 400) => {
     if (!nativeApi) return;
     if (nativeTimer) clearTimeout(nativeTimer);
     nativeTimer = setTimeout(() => { nativeTimer = undefined; void reconcileNow(); }, delay);
   };
-  const runSync = async () => {
+  const sync = async () => {
     const config = syncConfig ?? await loadSyncConfig();
     if (!config?.url) return { ok: false, status: 'error' as const, error: 'WebDAV is not configured' };
-    await reconcileNow();
+    await reconcile();
     const engine = new WebDavSyncEngine(repository, webDavClient(config));
     let result = await engine.sync();
-    const postReconcile = await reconcileNow();
+    const postReconcile = await reconcile();
     if (result.status === 'idle' && postReconcile?.repoChanges) {
       result = await engine.sync();
-      await reconcileNow();
+      await reconcile();
     }
     return result;
+  };
+  let syncInFlight: ReturnType<typeof sync> | undefined;
+  const runSync = (): ReturnType<typeof sync> => {
+    if (!syncInFlight) {
+      syncInFlight = enqueueData(sync).finally(() => { syncInFlight = undefined; });
+    }
+    return syncInFlight;
   };
   // Publish browser-side changes soon instead of waiting for the next alarm.
   function schedulePush() {
@@ -434,7 +444,8 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       ? (message as { type?: string }).type : undefined;
     const payload = (message as { payload?: Record<string, any> }).payload ?? {};
     const accept = (work: () => Promise<unknown>) => {
-      void work().then(sendResponse).catch((error) => {
+      const changesData = /^(lumamark-(save|add|undo|update-existing|copy-existing|collection-create|collection-update|collection-delete|collection-restore|resolve-conflict|favorite|update|delete|restore|reorder|set-toolbar|import|clean-duplicates|purge-trash))$/.test(type ?? '');
+      void (changesData ? enqueueData(work) : work()).then(sendResponse).catch((error) => {
         const messageText = error instanceof Error ? error.message : String(error);
         const unsavable = /only http|unable to read the active page|url is required/i.test(messageText);
         sendResponse({ ok: false, error: unsavable ? 'unsavable' : messageText, unsavable });
@@ -631,6 +642,31 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       const undoToken = crypto.randomUUID();
       await rememberUndo({ token: undoToken, op: 'restore', ids: items.map((item) => item.id) });
       return { ok: true, items, undoToken };
+    });
+    if (type === 'lumamark-clean-duplicates') return accept(async () => {
+      const bookmarks = await repository.list();
+      const groups = duplicateGroups(bookmarks);
+      const extra = extraDuplicateIds(groups, await repository.listCollections());
+      const requested = new Set(Array.isArray(payload.ids) ? payload.ids.map(String) : []);
+      const ids = extra.filter((id) => requested.has(id));
+      for (const id of ids) await service.remove(id);
+      const undoToken = crypto.randomUUID();
+      await rememberUndo({ token: undoToken, op: 'restore', ids });
+      return { ok: true, deleted: ids.length, kept: groups.length, undoToken };
+    });
+    if (type === 'lumamark-purge-trash') return accept(async () => {
+      const requested = new Set(Array.isArray(payload.ids) ? payload.ids.map(String) : []);
+      const items = deletedBookmarks(await repository.list({ includeDeleted: true })).filter((item) => requested.has(item.id));
+      for (const item of items) await service.purge(item.id);
+      const purgedIds = new Set(items.map((item) => item.id));
+      // Conflict snapshots must not retain content after permanent deletion.
+      for (const conflict of await repository.listConflicts(true)) {
+        if (!purgedIds.has(conflict.bookmarkId)) continue;
+        const purged = (await repository.findById(conflict.bookmarkId))!;
+        await repository.putConflict({ ...conflict, local: purged, remote: purged, fields: [], resolvedAt: purged.purgedAt, resolution: 'merged' });
+      }
+      schedulePush();
+      return { ok: true, purged: items.length };
     });
     if (type === 'lumamark-restore') return accept(async () => {
       const ids = (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map(String);
