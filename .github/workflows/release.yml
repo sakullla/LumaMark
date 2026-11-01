@@ -57,8 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          notes_args=()
+          if [[ -f "docs/releases/$RELEASE_TAG.md" ]]; then
+            notes_args=(--notes-file "docs/releases/$RELEASE_TAG.md")
+          fi
           gh release create "$RELEASE_TAG" release/*.zip release/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "LumaMark ${RELEASE_TAG#v}" \
-            --generate-notes
+            --generate-notes "${notes_args[@]}"

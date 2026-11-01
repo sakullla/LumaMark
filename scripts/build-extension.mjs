@@ -48,7 +48,11 @@ for (const target of ['chrome', 'firefox', 'safari']) {
     : resolve(root, `apps/extension/manifest.${target}.json`);
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   // Safari Web Extensions have no bookmarks API or local favicon cache; LumaMark keeps its own list there.
-  if (target === 'safari') manifest.permissions = manifest.permissions.filter((permission) => permission !== 'bookmarks' && permission !== 'favicon');
+  if (target === 'safari') {
+    manifest.permissions = manifest.permissions.filter((permission) => permission !== 'bookmarks' && permission !== 'favicon');
+    // Safari identity belongs to the containing app and extension's Xcode bundle IDs.
+    delete manifest.key;
+  }
   await writeFile(resolve(targetDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   await cp(resolve(root, 'apps/extension/src/assets'), resolve(targetDir, 'assets'), { recursive: true });
 
@@ -79,9 +83,8 @@ for (const target of ['chrome', 'firefox', 'safari']) {
     await writeFile(resolve(targetDir, `${name}.html`), htmlShell(page.title, `${name}.js`));
   }
 
-  await writeFile(resolve(targetDir, 'PACKAGING.md'), target === 'safari'
-    ? '# Safari macOS packaging\n\nWrap this complete WebExtension directory in an Xcode Safari Web Extension target.\n'
-    : `# ${target} package\n\nLoad this directory as an unpacked extension or package it for distribution.\n`);
+  // Ship the migration instructions with every archive, including offline downloads.
+  await cp(resolve(root, 'docs/installation.md'), resolve(targetDir, 'PACKAGING.md'));
 }
 
 console.log(`Built Chrome, Firefox and Safari WebExtension packages in ${out}`);

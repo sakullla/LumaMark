@@ -9,8 +9,25 @@ import { placeItem } from '../../apps/extension/src/background/place';
 import { IndexedDbRepository } from '../../packages/storage/src/index';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { createHash, createPublicKey } from 'node:crypto';
 
 describe('browser adapter', () => {
+  it('pins the Firefox add-on identity across builds and temporary installations', () => {
+    const manifest = JSON.parse(readFileSync('apps/extension/manifest.firefox.json', 'utf8'));
+    expect(manifest.browser_specific_settings?.gecko?.id).toBe('lumamark@sakullla.github.io');
+  });
+
+  it('pins the unpacked Chrome identity to a permanent public key', () => {
+    const manifest = JSON.parse(readFileSync('apps/extension/manifest.chrome.json', 'utf8'));
+    expect(typeof manifest.key).toBe('string');
+    const der = Buffer.from(manifest.key, 'base64');
+    expect(createPublicKey({ key: der, type: 'spki', format: 'der' }).asymmetricKeyType).toBe('rsa');
+    // Pin the ID so an accidental key change cannot silently reset users' storage.
+    const id = createHash('sha256').update(der).digest('hex').slice(0, 32)
+      .replace(/[0-9a-f]/g, (value) => String.fromCharCode(97 + Number.parseInt(value, 16)));
+    expect(id).toBe('bookbjmmcebjikbdhdkmocppflemmgeb');
+  });
+
   it('replaces the existing save menu when entry points are registered again', async () => {
     const created = new Map<string, string>();
     const remove = vi.fn(async (id: string) => {
@@ -95,11 +112,18 @@ describe('browser adapter', () => {
         expect(existsSync(`dist/extension/${target}/${file}`)).toBe(true);
       }
       const manifest = JSON.parse(readFileSync(`dist/extension/${target}/manifest.json`, 'utf8'));
+      if (target === 'chrome') {
+        expect(manifest.key).toBe(JSON.parse(readFileSync('apps/extension/manifest.chrome.json', 'utf8')).key);
+        expect(readFileSync('dist/extension/chrome/PACKAGING.md', 'utf8')).toContain('bookbjmmcebjikbdhdkmocppflemmgeb');
+      } else expect(manifest.key).toBeUndefined();
       // LumaMark no longer replaces the new tab page; it syncs the browser's own bookmarks instead.
       expect(manifest.chrome_url_overrides).toBeUndefined();
       if (target === 'safari') expect(manifest.permissions).not.toContain('bookmarks');
       else expect(manifest.permissions).toContain('bookmarks');
-      if (target === 'firefox') expect(manifest.permissions).not.toContain('commands');
+      if (target === 'firefox') {
+        expect(manifest.permissions).not.toContain('commands');
+        expect(manifest.browser_specific_settings.gecko.id).toBe('lumamark@sakullla.github.io');
+      }
       expect(manifest.commands['save-current-page'].suggested_key.default).toBe('Alt+Shift+L');
       expect(manifest.permissions).toContain('alarms');
       if (target === 'chrome' || target === 'safari') expect(manifest.host_permissions).toEqual(expect.arrayContaining(['http://*/*', 'https://*/*']));
