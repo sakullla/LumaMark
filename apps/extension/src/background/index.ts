@@ -15,7 +15,7 @@ import {
   type SyncConfig,
 } from '../../../../packages/domain/src/index';
 import { exportLumaMarkJson, parseBookmarksHtml, parseLumaMarkJson, planImport, type DuplicateImportAction, type ImportPlan } from '../../../../packages/import-export/src/index';
-import { WebDavSyncEngine, type WebDavClient, type SyncManifest } from '../../../../packages/sync/src/index';
+import { pruneNonConflicts, WebDavSyncEngine, type ConflictResolution, type WebDavClient, type SyncManifest } from '../../../../packages/sync/src/index';
 import {
   captureActivePage,
   isSavablePageUrl,
@@ -372,8 +372,13 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
     const config = syncConfig ?? await loadSyncConfig();
     if (!config?.url) return { ok: false, status: 'error' as const, error: 'WebDAV is not configured' };
     await reconcileNow();
-    const result = await new WebDavSyncEngine(repository, webDavClient(config)).sync();
-    await reconcileNow();
+    const engine = new WebDavSyncEngine(repository, webDavClient(config));
+    let result = await engine.sync();
+    const postReconcile = await reconcileNow();
+    if (result.status === 'idle' && postReconcile?.repoChanges) {
+      result = await engine.sync();
+      await reconcileNow();
+    }
     return result;
   };
   // Publish browser-side changes soon instead of waiting for the next alarm.
@@ -557,13 +562,29 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       }
       return { ok: true };
     });
-    if (type === 'lumamark-list-conflicts') return accept(async () => ({ ok: true, items: await repository.listConflicts() }));
+    if (type === 'lumamark-list-conflicts') return accept(async () => ({ ok: true, items: await pruneNonConflicts(repository) }));
     if (type === 'lumamark-sync-status') return accept(async () => ({ ok: true, metadata: await repository.getSyncMetadata() }));
     if (type === 'lumamark-resolve-conflict') return accept(async () => {
       const config = syncConfig ?? await loadSyncConfig();
-      if (!config?.url) throw new Error('WebDAV is not configured');
-      const item = await new WebDavSyncEngine(repository, webDavClient(config)).resolveConflict(String(payload.id), payload.resolution, payload.merged);
-      return { ok: true, item };
+      const client = config?.url ? webDavClient(config) : { async read() { return {}; }, async write() { return {}; } };
+      const engine = new WebDavSyncEngine(repository, client);
+      const resolution = (payload.resolution === 'remote' ? 'remote' : payload.resolution === 'merged' ? 'merged' : 'local') as ConflictResolution;
+      const entries: Array<{ id: string; resolution: ConflictResolution; merged?: Bookmark }> = Array.isArray(payload.items)
+        ? payload.items.map((entry: { id?: unknown; resolution?: ConflictResolution; merged?: Bookmark }) => ({
+          id: String(entry.id ?? ''),
+          resolution: (entry.resolution === 'remote' ? 'remote' : entry.resolution === 'merged' ? 'merged' : 'local') as ConflictResolution,
+          merged: entry.merged,
+        })).filter((entry: { id: string }) => entry.id)
+        : payload.all
+          ? (await pruneNonConflicts(repository)).map((item) => ({ id: item.id, resolution }))
+          : (Array.isArray(payload.ids) ? payload.ids : [payload.id]).filter(Boolean).map((id: unknown) => ({
+            id: String(id),
+            resolution,
+            merged: payload.merged,
+          }));
+      const items = await engine.resolveConflicts(entries);
+      schedulePush();
+      return { ok: true, item: items[0], items };
     });
     if (type === 'lumamark-favorite') return accept(async () => {
       const current = await repository.findById(String(payload.id));

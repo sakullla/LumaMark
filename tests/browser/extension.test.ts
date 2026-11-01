@@ -658,5 +658,44 @@ describe('browser adapter', () => {
     expect(records).toHaveLength(2);
     expect(records.filter((item) => !item.deletedAt).map((item) => item.id)).toEqual([live.id]);
   });
+
+  it('prunes non-conflicting records in list-conflicts and resolves real conflicts in batch', async () => {
+    const repository = new IndexedDbRepository(`lumamark-conflicts-${crypto.randomUUID()}`);
+    const now = '2026-03-01T00:00:00.000Z';
+    const sameLocal = makeBookmark({ id: 'same-id', url: 'https://same.example/1', title: 'Same', position: 0 }, now);
+    const sameRemote = { ...sameLocal, position: 3, updatedAt: '2026-03-02T00:00:00.000Z' };
+    const oneLocal = makeBookmark({ id: 'one-id', url: 'https://one.example/', title: 'Local One' }, now);
+    const oneRemote = { ...oneLocal, title: 'Remote One', revision: 3, updatedAt: '2026-03-02T00:00:00.000Z' };
+    const twoLocal = makeBookmark({ id: 'two-id', url: 'https://two.example/', title: 'Local Two' }, now);
+    const twoRemote = { ...twoLocal, title: 'Remote Two', revision: 4, updatedAt: '2026-03-02T00:00:00.000Z' };
+    await repository.put(sameLocal);
+    await repository.put(oneLocal);
+    await repository.put(twoLocal);
+    await repository.putConflict({ id: 'c-same', bookmarkId: sameLocal.id, local: sameLocal, remote: sameRemote, fields: ['position'], createdAt: now });
+    await repository.putConflict({ id: 'c-one', bookmarkId: oneLocal.id, local: oneLocal, remote: oneRemote, fields: ['title'], createdAt: now });
+    await repository.putConflict({ id: 'c-two', bookmarkId: twoLocal.id, local: twoLocal, remote: twoRemote, fields: ['title'], createdAt: now });
+
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    startBackground({
+      i18n: { getUILanguage: () => 'zh-CN' },
+      tabs: { query: vi.fn().mockResolvedValue([]), create: vi.fn() },
+      runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } },
+    }, repository);
+    const send = (message: unknown) => new Promise<any>((resolve) => { listener?.(message, {}, resolve); });
+
+    const listed = await send({ type: 'lumamark-list-conflicts' });
+    expect(listed.ok).toBe(true);
+    expect(listed.items.map((item: { id: string }) => item.id).sort()).toEqual(['c-one', 'c-two']);
+
+    const resolved = await send({
+      type: 'lumamark-resolve-conflict',
+      payload: { ids: ['c-one', 'c-two'], resolution: 'remote' },
+    });
+    expect(resolved.ok).toBe(true);
+    expect(resolved.items).toHaveLength(2);
+    expect((await repository.findById('one-id'))?.title).toBe('Remote One');
+    expect((await repository.findById('two-id'))?.title).toBe('Remote Two');
+    expect((await send({ type: 'lumamark-list-conflicts' })).items).toEqual([]);
+  });
 });
 

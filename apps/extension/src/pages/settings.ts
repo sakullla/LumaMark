@@ -1,4 +1,5 @@
-import { collectionOptions, renderConflicts, settingsDocument } from '../ui/index';
+import { conflictFields, type Bookmark } from '../../../../packages/domain/src/index';
+import { collectionOptions, renderConflicts, settingsDocument, type ConflictRenderItem } from '../ui/index';
 import { classifyFailure } from '../ui/bar';
 import { copyFor, detectUiLanguage, fill, probeSentence, relativeTime, type UiLanguage } from '../ui/copy';
 import { readPreferences, savePreference, type AccentChoice, type ThemeChoice } from '../ui/theme';
@@ -34,6 +35,10 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   const dataStatus = root.querySelector<HTMLElement>('#data-status');
   const homeStatus = root.querySelector<HTMLElement>('#home-status');
   const conflicts = root.querySelector<HTMLElement>('#conflicts');
+  const conflictBar = root.querySelector<HTMLElement>('#conflict-bar');
+  const conflictBarText = root.querySelector<HTMLElement>('#conflict-bar-text');
+  const conflictDialog = root.querySelector<HTMLDialogElement>('#conflict-dialog');
+  const conflictDialogCount = root.querySelector<HTMLElement>('#conflict-dialog-count');
   const syncMetadata = root.querySelector<HTMLElement>('#sync-metadata');
   const importAction = root.querySelector<HTMLSelectElement>('#import-action');
   const passwordInput = root.querySelector<HTMLInputElement>('#webdav-password');
@@ -42,6 +47,23 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   const statusText = (status: SettingsStatus, detail = '') => settingsStatusMessage(status, detail, language);
   let configured = false;
   let conflictCount = 0;
+  let currentConflicts: ConflictRenderItem[] = [];
+  const selectedConflicts = new Set<string>();
+
+  const openConflictDialog = () => {
+    if (!conflictDialog || !conflictCount) return;
+    if (typeof conflictDialog.showModal === 'function') {
+      if (!conflictDialog.open) conflictDialog.showModal();
+    } else {
+      conflictDialog.setAttribute('open', '');
+    }
+  };
+
+  const closeConflictDialog = () => {
+    if (!conflictDialog) return;
+    if (typeof conflictDialog.close === 'function' && conflictDialog.open) conflictDialog.close();
+    conflictDialog.removeAttribute('open');
+  };
 
   /** One-line summary at the top of the sync card. */
   const setSummary = (state: 'idle' | 'ok' | 'pending' | 'error' | 'conflict' | 'busy', message: string) => {
@@ -94,27 +116,88 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
     }
   });
 
-  const renderConflictList = async (items: Array<{ id: string; local?: { title?: string; url?: string; notes?: string }; remote?: { title?: string; url?: string; notes?: string } }> = []) => {
+  const bindConflictEvents = () => {
     if (!conflicts) return;
-    conflicts.innerHTML = renderConflicts(items.map((item) => ({
-      id: item.id,
-      local: item.local ? { title: item.local.title ?? '', url: item.local.url ?? '', notes: item.local.notes ?? '' } : undefined,
-      remote: item.remote ? { title: item.remote.title ?? '', url: item.remote.url ?? '', notes: item.remote.notes ?? '' } : undefined,
-    })), language);
     conflicts.querySelectorAll<HTMLButtonElement>('[data-resolution]').forEach((button) => button.addEventListener('click', async () => {
       const card = button.closest<HTMLElement>('[data-conflict-id]');
       if (!card || (button.dataset.resolution !== 'local' && button.dataset.resolution !== 'remote')) return;
-      await sendRuntime(port, 'resolve-conflict', { id: card.dataset.conflictId, resolution: button.dataset.resolution });
+      const id = card.dataset.conflictId ?? '';
+      if (!id) return;
+      selectedConflicts.delete(id);
+      await sendRuntime(port, 'resolve-conflict', { id, resolution: button.dataset.resolution });
+      await loadConflicts();
+    }));
+
+    conflicts.querySelectorAll<HTMLInputElement>('[data-select-conflict]').forEach((checkbox) => checkbox.addEventListener('change', () => {
+      const id = checkbox.dataset.selectConflict ?? '';
+      if (!id) return;
+      if (checkbox.checked) selectedConflicts.add(id);
+      else selectedConflicts.delete(id);
+      void renderConflictList(currentConflicts);
+    }));
+
+    conflicts.querySelector<HTMLInputElement>('[data-conflict-select-all]')?.addEventListener('change', (event) => {
+      const target = event.currentTarget as HTMLInputElement;
+      if (target.checked) currentConflicts.forEach((item) => selectedConflicts.add(item.id));
+      else selectedConflicts.clear();
+      void renderConflictList(currentConflicts);
+    });
+
+    conflicts.querySelectorAll<HTMLButtonElement>('[data-batch-resolution]').forEach((button) => button.addEventListener('click', async () => {
+      const resolution = button.dataset.batchResolution;
+      if (resolution !== 'local' && resolution !== 'remote') return;
+      const ids = selectedConflicts.size
+        ? currentConflicts.filter((item) => selectedConflicts.has(item.id)).map((item) => item.id)
+        : currentConflicts.map((item) => item.id);
+      if (!ids.length) return;
+      selectedConflicts.clear();
+      await sendRuntime(port, 'resolve-conflict', { ids, resolution });
       await loadConflicts();
     }));
   };
 
-  const loadConflicts = async () => {
+  const renderConflictList = async (
+    items: Array<{ id: string; local?: Partial<Bookmark>; remote?: Partial<Bookmark>; fields?: string[] }> = [],
+    autoOpen = false,
+  ) => {
+    const realItems = items.filter((item) => (item.local && item.remote
+      ? conflictFields(item.local, item.remote).length > 0
+      : Boolean(item.local || item.remote)));
+    currentConflicts = realItems;
+    conflictCount = realItems.length;
+    const validIds = new Set(realItems.map((item) => item.id));
+    for (const id of [...selectedConflicts]) {
+      if (!validIds.has(id)) selectedConflicts.delete(id);
+    }
+    if (conflictBar) conflictBar.hidden = conflictCount === 0;
+    if (conflictBarText) {
+      conflictBarText.textContent = conflictCount
+        ? fill(conflictCount === 1 ? text.conflictCountOne : text.conflictCount, { n: conflictCount })
+        : text.settingsConflict;
+    }
+    if (conflictDialogCount) {
+      conflictDialogCount.hidden = conflictCount === 0;
+      conflictDialogCount.textContent = conflictCount ? String(conflictCount) : '';
+    }
+    if (conflicts) {
+      conflicts.innerHTML = renderConflicts(realItems, language, selectedConflicts);
+      bindConflictEvents();
+    }
+    if (!conflictCount) closeConflictDialog();
+    else if (autoOpen) openConflictDialog();
+  };
+
+  root.querySelector<HTMLButtonElement>('#open-conflicts')?.addEventListener('click', () => openConflictDialog());
+  root.querySelector<HTMLButtonElement>('#conflict-close')?.addEventListener('click', () => closeConflictDialog());
+  conflictDialog?.addEventListener('click', (event) => {
+    if (event.target === conflictDialog) closeConflictDialog();
+  });
+
+  const loadConflicts = async (autoOpen = false) => {
     try {
       const response = await sendRuntime(port, 'list-conflicts');
       const items = Array.isArray(response?.items) ? response.items : [];
-      conflictCount = items.length;
-      await renderConflictList(items);
+      await renderConflictList(items, autoOpen);
       const metadata = await sendRuntime(port, 'sync-status');
       const value = metadata?.metadata;
       if (syncMetadata && value) syncMetadata.textContent = `${text.lastSync}: ${relativeTime(value.lastSyncAt, language)} · ${text.pending}: ${value.pendingChanges ?? 0}`;
@@ -194,8 +277,8 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
         const kind = classifyFailure(String(response?.error ?? ''));
         setSync(kind && kind !== 'other' ? probeSentence(kind, language) : statusText('error'));
       } else setSync(statusText('synced'));
-      await renderConflictList(response?.conflicts ?? []);
-      await loadConflicts();
+      await renderConflictList(response?.conflicts ?? [], true);
+      await loadConflicts(true);
     } catch {
       setSync(statusText('error'));
     }
@@ -283,7 +366,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   });
   links.forEach((link) => link.addEventListener('click', () => { if (link.dataset.sectionLink) markSection(link.dataset.sectionLink); }));
 
-  void loadForm().then(loadConflicts);
+  void loadForm().then(() => loadConflicts(true));
   void loadNative();
 }
 

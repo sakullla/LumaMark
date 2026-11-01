@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Bookmark, BookmarkRepository, Collection, SyncMetadata } from '../../packages/domain/src/index';
-import { SyncRepository, SyncManifest, WebDavClient, WebDavSyncEngine } from '../../packages/sync/src/index';
+import { pruneNonConflicts, SyncRepository, SyncManifest, WebDavClient, WebDavSyncEngine } from '../../packages/sync/src/index';
 
 function bookmark(id: string, title: string, revision = 1, updatedAt = '2024-01-01T00:00:00.000Z', position = 0): Bookmark {
   return {
@@ -308,31 +308,68 @@ describe('WebDavSyncEngine', () => {
     expect(client.snapshot.manifest?.collections[0].toolbar).toBe(false);
   });
 
-  it('keeps both sides of a position-only bookmark conflict until one is chosen', async () => {
+  it('auto-converges position-only, timestamp-only, and dual-deleted differences without creating conflicts', async () => {
     const repository = new MemoryRepository();
     repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
     await repository.put(bookmark('same', 'Same', 2, '2024-01-02T00:00:00.000Z', 1));
+    await repository.put({ ...bookmark('both-gone', 'Gone', 2, '2024-01-02T00:00:00.000Z', 0), deletedAt: '2024-01-02T00:00:00.000Z' });
     const client = new MemoryClient();
     client.snapshot.manifest = {
       format: 'lumamark-sync',
       schemaVersion: 2,
       generatedAt: '2024-01-03T00:00:00.000Z',
       deviceId: 'device-b',
-      bookmarks: [bookmark('same', 'Same', 2, '2024-01-03T00:00:00.000Z', 5)],
+      bookmarks: [
+        bookmark('same', 'Same', 2, '2024-01-03T00:00:00.000Z', 5),
+        { ...bookmark('both-gone', 'Gone', 3, '2024-01-03T00:00:00.000Z', 0), deletedAt: '2024-01-03T00:00:00.000Z' },
+      ],
       collections: [],
     };
     const engine = new WebDavSyncEngine(repository, client);
     const result = await engine.sync();
-    expect(result.status).toBe('conflict');
-    expect(result.conflicts).toHaveLength(1);
-    expect(result.conflicts[0].local.position).toBe(1);
-    expect(result.conflicts[0].remote.position).toBe(5);
-    expect(result.conflicts[0].fields).toContain('position');
-    expect((await repository.findById('same'))?.position).toBe(1);
-    expect(client.snapshot.manifest?.bookmarks[0].position).toBe(5);
-    await engine.resolveConflict(result.conflicts[0].id, 'remote');
+    expect(result.status).toBe('idle');
+    expect(result.conflicts).toEqual([]);
     expect((await repository.findById('same'))?.position).toBe(5);
     expect((await repository.findById('same'))?.title).toBe('Same');
+    expect((await repository.findById('both-gone'))?.deletedAt).toBe('2024-01-03T00:00:00.000Z');
+  });
+
+  it('prunes stale non-conflicting records and resolves multiple real conflicts in batch', async () => {
+    const repository = new MemoryRepository();
+    repository.metadata.lastSyncAt = '2024-01-01T00:00:00.000Z';
+    const bogusLocal = bookmark('bogus', 'Identical', 2, '2024-01-02T00:00:00.000Z', 1);
+    const bogusRemote = bookmark('bogus', 'Identical', 2, '2024-01-03T00:00:00.000Z', 4);
+    await repository.putConflict({
+      id: 'c-bogus',
+      bookmarkId: 'bogus',
+      local: bogusLocal,
+      remote: bogusRemote,
+      fields: ['position'],
+      createdAt: '2024-01-03T00:00:00.000Z',
+    });
+    const firstLocal = bookmark('one', 'Local 1', 2, '2024-01-02T00:00:00.000Z');
+    const firstRemote = bookmark('one', 'Remote 1', 3, '2024-01-03T00:00:00.000Z');
+    const secondLocal = bookmark('two', 'Local 2', 2, '2024-01-02T00:00:00.000Z');
+    const secondRemote = bookmark('two', 'Remote 2', 4, '2024-01-03T00:00:00.000Z');
+    await repository.put(firstLocal);
+    await repository.put(secondLocal);
+    await repository.putConflict({ id: 'c-1', bookmarkId: 'one', local: firstLocal, remote: firstRemote, fields: ['title'], createdAt: '2024-01-03T00:00:00.000Z' });
+    await repository.putConflict({ id: 'c-2', bookmarkId: 'two', local: secondLocal, remote: secondRemote, fields: ['title'], createdAt: '2024-01-03T00:00:00.000Z' });
+
+    const active = await pruneNonConflicts(repository);
+    expect(active.map((item) => item.id)).toEqual(['c-1', 'c-2']);
+
+    const engine = new WebDavSyncEngine(repository, new MemoryClient());
+    const resolved = await engine.resolveConflicts([
+      { id: 'c-1', resolution: 'remote' },
+      { id: 'c-2', resolution: 'local' },
+    ]);
+    expect(resolved).toHaveLength(2);
+    expect((await repository.findById('one'))?.title).toBe('Remote 1');
+    expect((await repository.findById('two'))?.title).toBe('Local 2');
+    expect(await repository.listConflicts()).toEqual([]);
+    expect(repository.metadata.status).toBe('idle');
+    expect(repository.metadata.pendingChanges).toBe(0);
   });
 
   it('keeps a lower-revision choice and publishes it for the other browser', async () => {

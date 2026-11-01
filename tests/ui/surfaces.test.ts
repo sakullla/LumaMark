@@ -150,12 +150,24 @@ describe('bookmark bar and shared surfaces', () => {
     expect(renderEmptyState(defaultLibraryFilters())).toContain('<svg');
     expect(libraryFailureMessage()).not.toContain('No bookmarks yet');
     expect(libraryFailureMessage('zh')).not.toContain('还没有书签');
-    const conflicts = renderConflicts([{ id: 'c', local: { title: 'Local', url: 'https://local.example', notes: 'mine' }, remote: { title: 'Remote', url: 'https://remote.example', notes: 'theirs' } }]);
+    const conflicts = renderConflicts([
+      { id: 'c', local: { title: 'Local', url: 'https://local.example', notes: 'mine' }, remote: { title: 'Remote', url: 'https://remote.example', notes: 'theirs' } },
+      { id: 'same', local: { title: 'Same', url: 'https://same.example', notes: '' }, remote: { title: 'Same', url: 'https://same.example', notes: '' } },
+    ]);
     expect(conflicts).toContain('Local');
     expect(conflicts).toContain('Remote');
+    expect(conflicts).not.toContain('https://same.example');
     expect(conflicts).toContain('data-resolution="local"');
     expect(conflicts).toContain('data-resolution="remote"');
+    expect(conflicts).toContain('data-batch-resolution="local"');
+    expect(conflicts).toContain('data-batch-resolution="remote"');
+    expect(conflicts).toContain('data-conflict-select-all');
+    expect(conflicts).toContain('data-select-conflict="c"');
     expect(conflicts).not.toContain('data-resolution="merged"');
+    expect(renderConflicts([{ id: 'same', local: { title: 'Same', url: 'https://same.example', notes: '' }, remote: { title: 'Same', url: 'https://same.example', notes: '' } }])).toBe('');
+    expect(settings).toContain('id="conflict-dialog"');
+    expect(settings).toContain('id="conflict-bar"');
+    expect(settings).toContain('id="open-conflicts"');
     expect(typeof mountHome).toBe('function');
     expect(typeof mountLibrary).toBe('function');
     expect(typeof mountPopup).toBe('function');

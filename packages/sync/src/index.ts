@@ -3,11 +3,16 @@ import {
   BookmarkRepository,
   ConflictRecord,
   Collection,
+  conflictFields,
   CURRENT_SCHEMA_VERSION,
+  hasBookmarkConflict,
   migrateBookmark,
   migrateCollection,
   SyncMetadata,
+  urlKey,
 } from '../../domain/src/index';
+
+export { conflictFields, hasBookmarkConflict };
 
 export interface SyncManifest {
   format: 'lumamark-sync';
@@ -103,6 +108,58 @@ function newerCollection(left: Collection, right: Collection): Collection {
   return collectionSignature(normalizedRight) > collectionSignature(normalizedLeft) ? normalizedRight : normalizedLeft;
 }
 
+function newerBookmark(left: Bookmark, right: Bookmark, collections?: ReadonlyMap<string, Collection>): Bookmark {
+  const normalizedLeft = migrateBookmark(left);
+  const normalizedRight = migrateBookmark(right);
+  if (Boolean(normalizedLeft.deletedAt) !== Boolean(normalizedRight.deletedAt)) {
+    return normalizedLeft.deletedAt ? normalizedLeft : normalizedRight;
+  }
+  let winner: Bookmark;
+  if (normalizedRight.revision !== normalizedLeft.revision) {
+    winner = normalizedRight.revision > normalizedLeft.revision ? normalizedRight : normalizedLeft;
+  } else if (normalizedRight.updatedAt !== normalizedLeft.updatedAt) {
+    winner = normalizedRight.updatedAt > normalizedLeft.updatedAt ? normalizedRight : normalizedLeft;
+  } else {
+    winner = bookmarkSignature(normalizedRight) > bookmarkSignature(normalizedLeft) ? normalizedRight : normalizedLeft;
+  }
+  const other = winner === normalizedLeft ? normalizedRight : normalizedLeft;
+  if (collections && winner.collectionId && other.collectionId && winner.collectionId !== other.collectionId) {
+    const winnerFolder = collections.get(winner.collectionId);
+    const otherFolder = collections.get(other.collectionId);
+    if (winnerFolder?.deletedAt && otherFolder && !otherFolder.deletedAt) {
+      return { ...winner, collectionId: other.collectionId };
+    }
+  }
+  return winner;
+}
+
+export async function pruneNonConflicts(repository: SyncRepository): Promise<ConflictRecord[]> {
+  const openConflicts = await repository.listConflicts();
+  if (!openConflicts.length) return [];
+  const active: ConflictRecord[] = [];
+  let pruned = false;
+  const resolvedAt = new Date().toISOString();
+  for (const conflict of openConflicts) {
+    const fields = conflictFields(conflict.local, conflict.remote);
+    if (!fields.length) {
+      pruned = true;
+      await repository.putConflict({ ...conflict, resolvedAt, resolution: 'merged' });
+      continue;
+    }
+    active.push(JSON.stringify(conflict.fields) === JSON.stringify(fields) ? conflict : { ...conflict, fields });
+  }
+  if (pruned) {
+    const metadata = await repository.getSyncMetadata();
+    await repository.setSyncMetadata({
+      ...metadata,
+      status: active.length ? 'conflict' : metadata.status === 'conflict' ? 'idle' : metadata.status,
+      pendingChanges: active.length,
+      error: active.length ? metadata.error : undefined,
+    });
+  }
+  return active;
+}
+
 function manifestFor(deviceId: string, bookmarks: Bookmark[], collections: Collection[], now = new Date().toISOString()): SyncManifest {
   return {
     format: 'lumamark-sync',
@@ -141,22 +198,41 @@ export class WebDavSyncEngine {
 
   /** Resolve one persisted conflict and leave the next sync to publish the choice. */
   async resolveConflict(conflictId: string, resolution: ConflictResolution, merged?: Bookmark): Promise<ConflictRecord> {
-    const conflict = (await this.repository.listConflicts()).find((item) => item.id === conflictId);
-    if (!conflict) throw new Error('Conflict not found');
-    const chosen = resolution === 'local' ? conflict.local : resolution === 'remote' ? conflict.remote : merged;
-    if (!chosen || chosen.id !== conflict.bookmarkId) throw new Error('Merged bookmark is required for this conflict');
+    const [resolved] = await this.resolveConflicts([{ id: conflictId, resolution, merged }]);
+    return resolved;
+  }
+
+  /** Resolve one or more persisted conflicts in a single batch and update sync metadata. */
+  async resolveConflicts(
+    entries: ReadonlyArray<{ id: string; resolution: ConflictResolution; merged?: Bookmark }>,
+  ): Promise<ConflictRecord[]> {
+    if (!entries.length) return [];
+    const openConflicts = await this.repository.listConflicts();
+    const byId = new Map(openConflicts.map((item) => [item.id, item]));
+    const planned = entries.map((entry) => {
+      const conflict = byId.get(entry.id);
+      if (!conflict) throw new Error('Conflict not found');
+      const chosen = entry.resolution === 'local' ? conflict.local : entry.resolution === 'remote' ? conflict.remote : entry.merged;
+      if (!chosen || chosen.id !== conflict.bookmarkId) throw new Error('Merged bookmark is required for this conflict');
+      return { conflict, chosen, resolution: entry.resolution };
+    });
+
     const resolvedAt = new Date().toISOString();
-    // Lift the choice above both revisions so the next sync can publish it.
-    // Do not move lastSyncAt: that baseline still covers every unresolved edit.
-    const selected: Bookmark = {
-      ...chosen,
-      updatedAt: resolvedAt,
-      revision: Math.max(conflict.local.revision, conflict.remote.revision, chosen.revision) + 1,
-    };
-    await this.repository.put(selected);
-    const resolved: ConflictRecord = { ...conflict, resolvedAt, resolution };
-    await this.repository.putConflict(resolved);
-    const remainingConflicts = await this.repository.listConflicts();
+    const results: ConflictRecord[] = [];
+    for (const { conflict, chosen, resolution } of planned) {
+      // Lift the choice above both revisions so the next sync can publish it.
+      // Do not move lastSyncAt: that baseline still covers every unresolved edit.
+      const selected: Bookmark = {
+        ...chosen,
+        updatedAt: resolvedAt,
+        revision: Math.max(conflict.local.revision, conflict.remote.revision, chosen.revision) + 1,
+      };
+      await this.repository.put(selected);
+      const resolved: ConflictRecord = { ...conflict, resolvedAt, resolution };
+      await this.repository.putConflict(resolved);
+      results.push(resolved);
+    }
+    const remainingConflicts = await pruneNonConflicts(this.repository);
     const metadata = await this.repository.getSyncMetadata();
     await this.repository.setSyncMetadata({
       ...metadata,
@@ -164,7 +240,7 @@ export class WebDavSyncEngine {
       pendingChanges: remainingConflicts.length,
       error: undefined,
     });
-    return resolved;
+    return results;
   }
 
   async sync(): Promise<SyncResult> {
@@ -213,9 +289,32 @@ export class WebDavSyncEngine {
         if (selected !== localCollection) pendingCollections.push(selected);
       }
 
+      const liveIdsByFolderUrl = new Map<string, Set<string>>();
       for (const id of ids) {
         const localItem = byId.get(id);
         const remoteItem = remoteById.get(id);
+        const liveCandidate = (!localItem?.deletedAt && !remoteItem?.deletedAt) ? (localItem ?? remoteItem) : undefined;
+        if (!liveCandidate) continue;
+        const key = `${liveCandidate.collectionId ?? ''}::${urlKey(liveCandidate.url)}`;
+        let group = liveIdsByFolderUrl.get(key);
+        if (!group) {
+          group = new Set<string>();
+          liveIdsByFolderUrl.set(key, group);
+        }
+        group.add(id);
+      }
+      const liveSameUrlKeysFor = (id: string): Set<string> => {
+        const keys = new Set<string>();
+        for (const [key, group] of liveIdsByFolderUrl) {
+          if (group.size > 1 || (group.size === 1 && !group.has(id))) keys.add(key);
+        }
+        return keys;
+      };
+
+      for (const id of ids) {
+        const localItem = byId.get(id);
+        const remoteItem = remoteById.get(id);
+        const unresolved = unresolvedByBookmark.get(id);
         if (!localItem && remoteItem) {
           merged.set(id, remoteItem);
           pendingBookmarks.push(remoteItem);
@@ -227,20 +326,40 @@ export class WebDavSyncEngine {
         }
         if (!localItem || !remoteItem) continue;
         if (equalBookmark(localItem, remoteItem)) {
+          if (unresolved) {
+            await this.repository.putConflict({ ...unresolved, resolvedAt: new Date().toISOString(), resolution: 'merged' });
+          }
           merged.set(id, localItem);
+          continue;
+        }
+
+        const fields = conflictFields(localItem, remoteItem, {
+          collections: mergedCollections,
+          liveSameUrlKeys: liveSameUrlKeysFor(id),
+        });
+        if (!fields.length) {
+          if (unresolved) {
+            await this.repository.putConflict({ ...unresolved, resolvedAt: new Date().toISOString(), resolution: 'merged' });
+          }
+          const selected = newerBookmark(localItem, remoteItem, mergedCollections);
+          merged.set(id, selected);
+          if (!equalBookmark(selected, localItem)) pendingBookmarks.push(selected);
           continue;
         }
 
         const localChanged = changedSince(localItem, before.lastSyncAt);
         const remoteChanged = changedSince(remoteItem, before.lastSyncAt);
-        const unresolved = unresolvedByBookmark.get(id);
         const resolved = resolvedByBookmark.get(id);
         // The stored remote snapshot is the version already considered. A matching
         // remote is the choice waiting to be published, not a new conflict.
         const remoteMatchesResolved = resolved !== undefined && equalBookmark(remoteItem, resolved.remote);
         if (unresolved || (localChanged && remoteChanged && !remoteMatchesResolved)) {
           if (unresolved) {
-            conflicts.push(unresolved);
+            const nextConflict: ConflictRecord = JSON.stringify(unresolved.fields) === JSON.stringify(fields)
+              ? unresolved
+              : { ...unresolved, fields };
+            if (nextConflict !== unresolved) await this.repository.putConflict(nextConflict);
+            conflicts.push(nextConflict);
             merged.set(id, localItem);
             continue;
           }
@@ -249,7 +368,7 @@ export class WebDavSyncEngine {
             bookmarkId: id,
             local: localItem,
             remote: remoteItem,
-            fields: ['url', 'title', 'notes', 'tags', 'collectionId', 'position', 'favorite', 'deletedAt'],
+            fields,
             createdAt: new Date().toISOString(),
           };
           conflicts.push(conflict);

@@ -185,6 +185,82 @@ export function normalizeTags(tags: string[] | undefined): string[] {
   return [...new Set((tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].sort();
 }
 
+export type ConflictField = 'url' | 'title' | 'notes' | 'tags' | 'collectionId' | 'favorite' | 'deletedAt';
+
+/**
+ * Compute user-meaningful fields that genuinely conflict between two versions of a bookmark.
+ * Metadata (`updatedAt`, `createdAt`, `revision`, `domain`, `faviconUrl`), sibling `position`,
+ * and records deleted on both sides do not constitute a manual conflict.
+ */
+export function conflictFields(
+  left: Partial<Bookmark> | undefined,
+  right: Partial<Bookmark> | undefined,
+  options: {
+    collections?: ReadonlyMap<string, Collection>;
+    liveSameUrlKeys?: ReadonlySet<string>;
+  } = {},
+): ConflictField[] {
+  if (!left || !right) return [];
+  const leftDeleted = Boolean(left.deletedAt);
+  const rightDeleted = Boolean(right.deletedAt);
+  if (leftDeleted && rightDeleted) return [];
+
+  const sameLogicalFolder = (a: string | undefined, b: string | undefined): boolean => {
+    if (a === b) return true;
+    if (!a || !b || !options.collections) return false;
+    const folderA = options.collections.get(a);
+    const folderB = options.collections.get(b);
+    if (!folderA || !folderB) return false;
+    return folderA.name.trim() === folderB.name.trim()
+      && (folderA.parentId ?? undefined) === (folderB.parentId ?? undefined);
+  };
+
+  const contentFields: ConflictField[] = [];
+  if (left.url !== undefined && right.url !== undefined && urlKey(left.url) !== urlKey(right.url)) {
+    contentFields.push('url');
+  }
+  if ((left.title ?? '').trim() !== (right.title ?? '').trim()) {
+    contentFields.push('title');
+  }
+  if ((left.notes ?? '').trim() !== (right.notes ?? '').trim()) {
+    contentFields.push('notes');
+  }
+  if (left.tags !== undefined || right.tags !== undefined) {
+    const leftTags = normalizeTags(left.tags);
+    const rightTags = normalizeTags(right.tags);
+    if (leftTags.length !== rightTags.length || leftTags.some((tag, index) => tag !== rightTags[index])) {
+      contentFields.push('tags');
+    }
+  }
+  if (!sameLogicalFolder(left.collectionId ?? undefined, right.collectionId ?? undefined)) {
+    contentFields.push('collectionId');
+  }
+  if ((left.favorite !== undefined || right.favorite !== undefined) && Boolean(left.favorite) !== Boolean(right.favorite)) {
+    contentFields.push('favorite');
+  }
+
+  if (leftDeleted !== rightDeleted) {
+    const alive = leftDeleted ? right : left;
+    const deleted = leftDeleted ? left : right;
+    const aliveKey = `${alive.collectionId ?? ''}::${urlKey(alive.url ?? '')}`;
+    if (options.liveSameUrlKeys?.has(aliveKey)) return [];
+    if (contentFields.length === 0 && (alive.revision ?? 1) <= 1 && (deleted.revision ?? 1) > (alive.revision ?? 1)) {
+      return [];
+    }
+    return ['deletedAt', ...contentFields];
+  }
+
+  return contentFields;
+}
+
+export function hasBookmarkConflict(
+  left: Partial<Bookmark> | undefined,
+  right: Partial<Bookmark> | undefined,
+  options?: Parameters<typeof conflictFields>[2],
+): boolean {
+  return conflictFields(left, right, options).length > 0;
+}
+
 export function validateBookmark(value: unknown): asserts value is Bookmark {
   if (!value || typeof value !== 'object') throw new Error('Invalid bookmark');
   const item = value as Partial<Bookmark>;

@@ -1,4 +1,4 @@
-import { isSeparator, type Bookmark, type BookmarkQuery, type Collection } from '../../../../packages/domain/src/index';
+import { conflictFields, isSeparator, type Bookmark, type BookmarkQuery, type Collection } from '../../../../packages/domain/src/index';
 import { folderTree, isHttpUrl, tileHue, titleInitial, type FolderNode, type HomeSyncPhrase } from './bar';
 import { copyFor, fill, relativeTime, type UiLanguage } from './copy';
 import { escapeHtml } from './html';
@@ -259,14 +259,64 @@ export function libraryFailureMessage(language: UiLanguage = 'en'): string {
   return `<p class="load-error" role="status">${escapeHtml(copyFor(language).loadFailed)}</p>`;
 }
 
-export function renderConflicts(items: Array<{ id: string; local?: Pick<Bookmark, 'title' | 'url' | 'notes'>; remote?: Pick<Bookmark, 'title' | 'url' | 'notes'> }>, language: UiLanguage = 'en'): string {
+export interface ConflictRenderItem {
+  id: string;
+  local?: Partial<Bookmark>;
+  remote?: Partial<Bookmark>;
+  fields?: string[];
+}
+
+export function renderConflicts(
+  items: ConflictRenderItem[],
+  language: UiLanguage = 'en',
+  selectedIds: ReadonlySet<string> = new Set(),
+): string {
   const text = copyFor(language);
-  if (!items.length) return '';
-  const side = (label: string, record: Pick<Bookmark, 'title' | 'url' | 'notes'> | undefined, resolution: 'local' | 'remote', action: string) =>
-    `<div class="conflict-side"><h4>${escapeHtml(label)}</h4><p class="conflict-title">${escapeHtml(record?.title ?? '')}</p><p class="conflict-url">${escapeHtml(record?.url ?? '')}</p>` +
-    `${record?.notes ? `<p>${escapeHtml(record.notes)}</p>` : ''}<button type="button" class="secondary" data-resolution="${resolution}">${escapeHtml(action)}</button></div>`;
-  return `<h3>${escapeHtml(text.conflictTitle)}</h3>` + items.map((item) => `<article data-conflict-id="${escapeHtml(item.id)}">` +
-    `${side(text.localVersion, item.local, 'local', text.keepThis)}${side(text.otherVersion, item.remote, 'remote', text.keepOther)}</article>`).join('');
+  const realItems = items.filter((item) => (item.local && item.remote
+    ? conflictFields(item.local, item.remote).length > 0
+    : Boolean(item.local || item.remote)));
+  if (!realItems.length) return '';
+
+  const selectedCount = realItems.filter((item) => selectedIds.has(item.id)).length;
+  const allSelected = selectedCount === realItems.length;
+  const fieldNames: Record<string, string> = {
+    title: text.titleLabel,
+    url: text.urlLabel,
+    notes: text.notes,
+    tags: text.tags,
+    collectionId: text.folder,
+    favorite: text.favorites,
+    deletedAt: text.conflictDeleted,
+  };
+  const toolbar = `<div class="conflict-toolbar" role="toolbar" aria-label="${escapeHtml(text.conflictTitle)}">` +
+    `<label class="check-line"><input id="conflict-select-all" type="checkbox" data-conflict-select-all${allSelected ? ' checked' : ''}>` +
+    `<span>${escapeHtml(selectedCount ? fill(text.selectedCount, { n: selectedCount }) : text.selectAll)}</span></label>` +
+    `<div class="button-row">` +
+    `<button type="button" id="conflict-batch-local" class="secondary" data-batch-resolution="local">${escapeHtml(selectedCount ? text.keepSelectedThis : text.keepAllThis)}</button>` +
+    `<button type="button" id="conflict-batch-remote" class="secondary" data-batch-resolution="remote">${escapeHtml(selectedCount ? text.keepSelectedOther : text.keepAllOther)}</button>` +
+    `</div></div>`;
+
+  const side = (label: string, record: Partial<Bookmark> | undefined, resolution: 'local' | 'remote', action: string) => {
+    const badges = (record?.deletedAt ? `<span class="tag conflict-tag-danger">${escapeHtml(text.conflictDeleted)}</span>` : '')
+      + (record?.favorite ? `<span class="tag">${escapeHtml(text.conflictFavorited)}</span>` : '');
+    const tags = record?.tags?.length
+      ? `<p class="bookmark-tags">${record.tags.map((tag) => `<span class="tag">#${escapeHtml(tag)}</span>`).join('')}</p>`
+      : '';
+    return `<div class="conflict-side"><div class="conflict-side-head"><h4>${escapeHtml(label)}</h4>${badges ? `<div class="chip-row">${badges}</div>` : ''}</div>` +
+      `<p class="conflict-title">${escapeHtml(record?.title ?? '')}</p><p class="conflict-url">${escapeHtml(record?.url ?? '')}</p>` +
+      `${record?.notes ? `<p class="conflict-notes">${escapeHtml(record.notes)}</p>` : ''}${tags}` +
+      `<button type="button" class="secondary" data-resolution="${resolution}">${escapeHtml(action)}</button></div>`;
+  };
+
+  return `<h3>${escapeHtml(text.conflictTitle)}</h3>${toolbar}<div class="conflict-list">` + realItems.map((item) => {
+    const selected = selectedIds.has(item.id);
+    const fields = conflictFields(item.local, item.remote);
+    const diffChips = fields.map((field) => fieldNames[field] ? `<span class="tag">${escapeHtml(fieldNames[field])}</span>` : '').join('');
+    const itemTitle = item.local?.title || item.remote?.title || item.local?.url || item.remote?.url || '';
+    return `<article class="conflict-item${selected ? ' is-selected' : ''}" data-conflict-id="${escapeHtml(item.id)}">` +
+      `<div class="conflict-item-head"><label class="check-line conflict-select"><input type="checkbox" data-select-conflict="${escapeHtml(item.id)}"${selected ? ' checked' : ''} aria-label="${escapeHtml(text.select)} ${escapeHtml(itemTitle)}"><span>${escapeHtml(itemTitle)}</span></label>${diffChips ? `<div class="chip-row">${diffChips}</div>` : ''}</div>` +
+      `<div class="conflict-sides">${side(text.localVersion, item.local, 'local', text.keepThis)}${side(text.otherVersion, item.remote, 'remote', text.keepOther)}</div></article>`;
+  }).join('') + `</div>`;
 }
 
 export function renderSyncLine(phrase: HomeSyncPhrase, language: UiLanguage = 'en'): string {
@@ -427,7 +477,13 @@ export function settingsDocument(language: UiLanguage = 'en'): string {
     `<label for="webdav-password">${escapeHtml(text.password)}</label><input id="webdav-password" name="webdav-password" type="password" autocomplete="current-password">` +
     `<label class="check-line" for="auto-sync"><input id="auto-sync" name="auto-sync" type="checkbox"> ${escapeHtml(text.autoSync)}</label>` +
     `<div class="button-row"><button type="submit" class="primary">${escapeHtml(text.saveSync)}</button></div></form>` +
-    `<p id="sync-status" role="status" aria-live="polite"></p><section id="conflicts" aria-live="polite" aria-label="${escapeHtml(text.conflictTitle)}"></section></section>` +
+    `<p id="sync-status" role="status" aria-live="polite"></p>` +
+    `<div id="conflict-bar" class="conflict-bar" hidden><div class="conflict-bar-body"><strong id="conflict-bar-title">${escapeHtml(text.conflictTitle)}</strong><p id="conflict-bar-text">${escapeHtml(text.settingsConflict)}</p></div>` +
+    `<div class="button-row"><button type="button" id="open-conflicts" class="primary">${escapeHtml(text.openConflicts)}</button></div></div>` +
+    `<dialog id="conflict-dialog" class="dialog conflict-dialog" aria-labelledby="conflict-dialog-heading">` +
+    `<div class="dialog-head"><div class="conflict-dialog-title-row"><h2 id="conflict-dialog-heading" class="dialog-title">${escapeHtml(text.conflictTitle)}</h2><span id="conflict-dialog-count" class="count-badge" hidden></span></div>` +
+    `<button type="button" id="conflict-close" class="icon-button" title="${escapeHtml(text.close)}" aria-label="${escapeHtml(text.close)}">${uiIcon('x')}</button></div>` +
+    `<section id="conflicts" aria-live="polite" aria-label="${escapeHtml(text.conflictTitle)}"></section></dialog></section>` +
     `<section id="home-section" class="settings-card" aria-labelledby="home-heading">${cardHead('home-heading', text.homeGroup, text.homeExplain)}<div class="form-grid">` +
     `<label for="toolbar-folder">${escapeHtml(text.toolbarFolderLabel)}</label><div class="field-with-action"><select id="toolbar-folder"></select><button id="save-toolbar" class="primary" type="button">${escapeHtml(text.save)}</button></div>` +
     `<label for="search-url">${escapeHtml(text.searchAddress)}</label><div class="field-with-action"><input id="search-url" type="url" inputmode="url" autocomplete="off"><button id="save-search" class="secondary" type="button">${escapeHtml(text.saveSearch)}</button></div>` +
