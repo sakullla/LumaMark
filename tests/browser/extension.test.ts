@@ -528,7 +528,7 @@ describe('browser adapter', () => {
     expect(await send('lumamark-restore', { ids: [looseCopy.id] })).toMatchObject({ ok: false });
   });
 
-  it('exports permanent deletes as ids and applies them on import', async () => {
+  it('omits permanent deletes from exports while still applying legacy backup deletes', async () => {
     const repository = new IndexedDbRepository(`lumamark-export-${crypto.randomUUID()}`);
     const stamp = new Date().toISOString();
     const live = makeBookmark({ url: 'https://kept.example/a', title: 'Kept' });
@@ -544,7 +544,7 @@ describe('browser adapter', () => {
     expect(exported.ok).toBe(true);
     expect(exported.content).not.toContain('Secret');
     expect(exported.content).not.toContain('Gone folder');
-    expect(exported.content).toContain(secret.id);
+    expect(exported.content).not.toContain(secret.id);
     expect(exported.content).toContain('Kept folder');
 
     const other = new IndexedDbRepository(`lumamark-import-${crypto.randomUUID()}`);
@@ -554,7 +554,11 @@ describe('browser adapter', () => {
     startBackground({ runtime: { onMessage: { addListener: (callback: any) => { otherListener = callback; } } } } as never, other);
     const sendOther = (type: string, payload?: unknown) => new Promise<any>((resolve) => otherListener({ type, payload }, {}, resolve));
     const imported = await sendOther('lumamark-import', { format: 'json', content: exported.content, action: 'skip' });
-    expect(imported).toMatchObject({ ok: true, purged: 1 });
+    expect(imported).toMatchObject({ ok: true, purged: 0 });
+    expect(await other.findById(secret.id)).toEqual(revived);
+    const legacyContent = JSON.stringify({ ...JSON.parse(exported.content), purged: [secret.id] });
+    const legacyImport = await sendOther('lumamark-import', { format: 'json', content: legacyContent, action: 'skip' });
+    expect(legacyImport).toMatchObject({ ok: true, purged: 1 });
     expect(await other.findById(secret.id)).toMatchObject({ title: '', notes: '', url: 'https://deleted.invalid/' });
     expect((await other.findById(secret.id))?.purgedAt).toBeTruthy();
     expect((await other.listCollections()).map((item) => item.id)).toEqual(['kept']);

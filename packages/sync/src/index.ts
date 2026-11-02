@@ -23,7 +23,7 @@ export interface SyncManifest {
   collections: Collection[];
   /**
    * Bookmark ids emptied from Trash. The id stays so another device cannot
-   * upload the old title, URL, or notes again. Content stays in local storage.
+   * upload the old title, URL, or notes again. Deleted content is discarded.
    */
   purged?: string[];
 }
@@ -214,13 +214,14 @@ function purgedBookmark(id: string, purgedAt: string): Bookmark {
 }
 
 /**
- * Rebuild permanent deletes from a compact id list. An inline tombstone is kept
- * as-is so an older file still merges. A live record with the same id loses.
+ * Rebuild permanent deletes from a compact id list, stripping legacy content.
+ * A live record with the same id loses, regardless of its order in the file.
  */
 export function expandSyncBookmarks(bookmarks: readonly Bookmark[] = [], purged: readonly string[] = []): Bookmark[] {
   const byId = new Map<string, Bookmark>();
   for (const item of bookmarks) {
-    if (item?.id) byId.set(item.id, migrateBookmark(item));
+    if (!item?.id || byId.get(item.id)?.purgedAt) continue;
+    byId.set(item.id, item.purgedAt ? purgedBookmark(item.id, item.purgedAt) : migrateBookmark(item));
   }
   for (const id of sortedPurgedIds(purged)) {
     const existing = byId.get(id);
@@ -239,7 +240,8 @@ export function compactSyncManifest(manifest: SyncManifest): SyncManifest {
     else bookmarks.push(item);
   }
   const ids = sortedPurgedIds(purged);
-  const next: SyncManifest = { ...manifest, bookmarks };
+  const deleted = new Set(ids);
+  const next: SyncManifest = { ...manifest, bookmarks: bookmarks.filter((item) => !deleted.has(item.id)) };
   if (ids.length) next.purged = ids;
   else delete next.purged;
   return next;
@@ -248,7 +250,9 @@ export function compactSyncManifest(manifest: SyncManifest): SyncManifest {
 function encodingMatches(remote: SyncManifest | undefined, compacted: SyncManifest): boolean {
   if (!remote || remote.schemaVersion !== CURRENT_SCHEMA_VERSION) return false;
   if (remote.bookmarks.some((item) => item.purgedAt)) return false;
-  const left = sortedPurgedIds(remote.purged);
+  const left = remote.purged ?? [];
+  const deleted = new Set(left);
+  if (remote.bookmarks.some((item) => deleted.has(item.id))) return false;
   const right = sortedPurgedIds(compacted.purged);
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }

@@ -9,11 +9,28 @@ import {
   SyncConfig,
 } from '../../domain/src/index';
 
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const BOOKMARKS = 'bookmarks';
 const COLLECTIONS = 'collections';
 const META = 'meta';
 const CONFLICTS = 'conflicts';
+
+type StoredBookmark = Bookmark | (Pick<Bookmark, 'id' | 'createdAt' | 'updatedAt' | 'deletedAt' | 'revision'> & { purgedAt: string });
+
+// Deleted content and empty placeholder fields need not occupy IndexedDB or its indexes.
+function compactBookmark(bookmark: StoredBookmark): StoredBookmark {
+  if (!bookmark.purgedAt) return bookmark;
+  const { id, createdAt, updatedAt, deletedAt, purgedAt, revision } = bookmark;
+  return { id, createdAt, updatedAt, deletedAt, purgedAt, revision };
+}
+
+function expandBookmark(bookmark: StoredBookmark): Bookmark {
+  if (!bookmark.purgedAt) return bookmark as Bookmark;
+  return {
+    ...compactBookmark(bookmark), url: 'https://deleted.invalid/', title: '', domain: '',
+    notes: '', tags: [], favorite: false, position: 0,
+  };
+}
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -53,6 +70,14 @@ export class IndexedDbRepository implements BookmarkRepository {
         }
         if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: 'key' });
         if (!db.objectStoreNames.contains(CONFLICTS)) db.createObjectStore(CONFLICTS, { keyPath: 'id' });
+        // Upgrade existing tombstones atomically, including legacy records with content.
+        const cursor = request.transaction!.objectStore(BOOKMARKS).openCursor();
+        cursor.onsuccess = () => {
+          const entry = cursor.result;
+          if (!entry) return;
+          if (entry.value.purgedAt) entry.update(compactBookmark(entry.value));
+          entry.continue();
+        };
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error('Unable to open IndexedDB'));
@@ -66,7 +91,7 @@ export class IndexedDbRepository implements BookmarkRepository {
     const values = await requestResult(tx.objectStore(BOOKMARKS).getAll());
     await transactionDone(tx);
     const needle = query.text?.trim().toLowerCase();
-    const filtered = values.filter((item) => {
+    const filtered = values.map(expandBookmark).filter((item) => {
       if (!query.includeDeleted && item.deletedAt) return false;
       if (query.collectionId !== undefined && item.collectionId !== query.collectionId) return false;
       if (query.tag !== undefined && !item.tags.includes(query.tag.toLowerCase())) return false;
@@ -89,7 +114,7 @@ export class IndexedDbRepository implements BookmarkRepository {
     const tx = db.transaction(BOOKMARKS, 'readonly');
     const value = await requestResult(tx.objectStore(BOOKMARKS).get(id));
     await transactionDone(tx);
-    return value;
+    return value ? expandBookmark(value) : undefined;
   }
 
   async findByUrl(url: string): Promise<Bookmark | undefined> {
@@ -97,13 +122,13 @@ export class IndexedDbRepository implements BookmarkRepository {
     const tx = db.transaction(BOOKMARKS, 'readonly');
     const value = await requestResult(tx.objectStore(BOOKMARKS).index('url').get(url));
     await transactionDone(tx);
-    return value;
+    return value ? expandBookmark(value) : undefined;
   }
 
   async put(bookmark: Bookmark): Promise<void> {
     const db = await this.db();
     const tx = db.transaction(BOOKMARKS, 'readwrite');
-    tx.objectStore(BOOKMARKS).put(bookmark);
+    tx.objectStore(BOOKMARKS).put(compactBookmark(bookmark));
     await transactionDone(tx);
   }
 

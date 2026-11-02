@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Bookmark, BookmarkRepository, BookmarkService, Collection, SyncMetadata } from '../../packages/domain/src/index';
-import { pruneNonConflicts, SyncRepository, SyncManifest, WebDavClient, WebDavSyncEngine } from '../../packages/sync/src/index';
+import { compactSyncManifest, expandSyncBookmarks, pruneNonConflicts, SyncRepository, SyncManifest, WebDavClient, WebDavSyncEngine } from '../../packages/sync/src/index';
 
 function bookmark(id: string, title: string, revision = 1, updatedAt = '2024-01-01T00:00:00.000Z', position = 0): Bookmark {
   return {
@@ -61,6 +61,48 @@ class MemoryClient implements WebDavClient {
 }
 
 describe('WebDavSyncEngine', () => {
+  it('compacts redundant remote deletion history once and leaves subsequent syncs unchanged', async () => {
+    const repository = new MemoryRepository();
+    await repository.put(bookmark('live', 'Live'));
+    await repository.put({ ...bookmark('gone', ''), deletedAt: '2024-01-01', purgedAt: '2024-01-01' });
+    const client = new MemoryClient();
+    client.snapshot.manifest = {
+      format: 'lumamark-sync', schemaVersion: 2, deviceId: 'remote', generatedAt: '2024-01-01',
+      bookmarks: [bookmark('live', 'Live')],
+      collections: [], purged: ['gone', '', 'gone'],
+    };
+    expect(compactSyncManifest({
+      ...client.snapshot.manifest, bookmarks: [bookmark('gone', 'Private title'), bookmark('live', 'Live')],
+    }).bookmarks.map((item) => item.id)).toEqual(['live']);
+    const engine = new WebDavSyncEngine(repository, client);
+    expect((await engine.sync()).status).toBe('idle');
+    expect(client.snapshot.manifest?.purged).toEqual(['gone']);
+    expect(client.snapshot.manifest?.bookmarks.map((item) => item.id)).toEqual(['live']);
+    expect(JSON.stringify(client.snapshot.manifest)).not.toContain('Private');
+    client.failWrite = true;
+    expect((await engine.sync()).status).toBe('idle');
+  });
+
+  it('strips legacy purged content and rejects duplicate live records in either order', async () => {
+    const original = bookmark('gone', 'Private title');
+    const purged = { ...original, notes: 'Private note', purgedAt: '2024-01-02T00:00:00.000Z' };
+    for (const entries of [[purged, original], [original, purged]]) {
+      const expanded = expandSyncBookmarks(entries);
+      expect(expanded).toHaveLength(1);
+      expect(expanded[0]).toMatchObject({ id: 'gone', title: '', notes: '', purgedAt: purged.purgedAt });
+      const repository = new MemoryRepository();
+      const client = new MemoryClient();
+      client.snapshot.manifest = {
+        format: 'lumamark-sync', schemaVersion: 2, deviceId: 'remote', generatedAt: '2024-01-01',
+        bookmarks: entries, collections: [],
+      };
+      expect((await new WebDavSyncEngine(repository, client).sync()).status).toBe('idle');
+      expect(await repository.findById('gone')).toMatchObject({ title: '', notes: '' });
+      expect(client.snapshot.manifest?.bookmarks).toEqual([]);
+      expect(client.snapshot.manifest?.purged).toEqual(['gone']);
+    }
+  });
+
   it('re-reads and re-merges a changed remote after a conditional write is rejected', async () => {
     const repository = new MemoryRepository();
     repository.metadata.autoSync = true;

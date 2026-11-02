@@ -70,7 +70,7 @@ export interface LumaMarkExport {
   exportedAt: string;
   bookmarks: Bookmark[];
   collections: Collection[];
-  /** Ids emptied from Trash. Content is not part of the backup. */
+  /** Legacy backup deletion history, accepted on import but no longer exported. */
   purged?: string[];
 }
 

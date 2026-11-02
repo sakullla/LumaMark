@@ -277,7 +277,7 @@ export function parseBookmarksHtml(text: string): ImportResult {
 }
 
 export function exportLumaMarkJson(bookmarks: Bookmark[], collections: Collection[], now = new Date().toISOString()): string {
-  const purged = [...new Set(bookmarks.filter((bookmark) => bookmark.purgedAt && bookmark.id).map((bookmark) => bookmark.id))].sort();
+  // Backups contain recoverable user data; deletion history belongs only to sync.
   const kept = bookmarks.filter((bookmark) => !bookmark.purgedAt);
   const payload: LumaMarkExport = {
     format: 'lumamark',
@@ -286,7 +286,6 @@ export function exportLumaMarkJson(bookmarks: Bookmark[], collections: Collectio
     bookmarks: kept.map((bookmark) => migrateBookmark(bookmark)),
     collections: collectionsForExport(kept, collections),
   };
-  if (purged.length) payload.purged = purged;
   return JSON.stringify(payload, null, 2);
 }
 
