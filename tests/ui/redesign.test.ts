@@ -80,6 +80,8 @@ describe('redesigned surfaces', () => {
     expect(settings).toContain(copyFor('en').nativeExplain);
     expect(settings.indexOf('id="native-sync"')).toBeLessThan(settings.indexOf('id="sync-form"'));
     expect(settings).toContain('id="sync-summary"');
+    expect(settings).toContain('for="toolbar-folder-trigger"');
+    expect(settings).toContain('id="toolbar-folder-panel" class="folder-popover" popover="manual"');
     expect(settings).toContain('aria-current="page"');
     expect(settingsDocument('zh')).toContain('浏览器书签');
     const library = libraryDocument();

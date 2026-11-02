@@ -3,6 +3,7 @@ import { collectionOptions, renderConflicts, settingsDocument, type ConflictRend
 import { classifyFailure } from '../ui/bar';
 import { copyFor, detectUiLanguage, fill, probeSentence, relativeTime, type UiLanguage } from '../ui/copy';
 import { readPreferences, savePreference, type AccentChoice, type ThemeChoice } from '../ui/theme';
+import { bindFolderPicker } from '../ui/folder-picker';
 import { chooseTextFile } from './files';
 import { sendRuntime, type RuntimePort } from './popup';
 
@@ -374,6 +375,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   });
   links.forEach((link) => link.addEventListener('click', () => { if (link.dataset.sectionLink) markSection(link.dataset.sectionLink); }));
 
+  bindFolderPicker(root.querySelector<HTMLSelectElement>('#toolbar-folder'), text);
   void loadForm().then(() => loadConflicts(true));
   void loadNative();
 }

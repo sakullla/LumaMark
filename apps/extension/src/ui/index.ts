@@ -500,7 +500,7 @@ export function settingsDocument(language: UiLanguage = 'en'): string {
     `<button type="button" id="conflict-close" class="icon-button" title="${escapeHtml(text.close)}" aria-label="${escapeHtml(text.close)}">${uiIcon('x')}</button></div>` +
     `<section id="conflicts" aria-live="polite" aria-label="${escapeHtml(text.conflictTitle)}"></section></dialog></section>` +
     `<section id="home-section" class="settings-card" aria-labelledby="home-heading">${cardHead('home-heading', text.homeGroup, text.homeExplain, 'home')}<div class="form-grid">` +
-    `<label for="toolbar-folder">${escapeHtml(text.toolbarFolderLabel)}</label><div class="field-with-action"><select id="toolbar-folder"></select><button id="save-toolbar" class="primary" type="button">${escapeHtml(text.save)}</button></div>` +
+    `<label for="toolbar-folder-trigger">${escapeHtml(text.toolbarFolderLabel)}</label><div class="field-with-action">${folderPickerField('toolbar-folder', '', '', text)}<button id="save-toolbar" class="primary" type="button">${escapeHtml(text.save)}</button></div>` +
     `<label for="search-url">${escapeHtml(text.searchAddress)}</label><div class="field-with-action"><input id="search-url" type="url" inputmode="url" autocomplete="off"><button id="save-search" class="secondary" type="button">${escapeHtml(text.saveSearch)}</button></div>` +
     `<div class="preset-row" role="group" aria-label="${escapeHtml(text.searchPresets)}">${SEARCH_PRESETS.map((preset) => `<button type="button" class="chip" data-search-preset="${escapeHtml(preset.url)}">${escapeHtml(preset.name)}</button>`).join('')}</div>` +
     `<p id="home-status" role="status"></p></div></section>` +
