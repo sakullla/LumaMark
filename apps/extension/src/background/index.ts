@@ -61,6 +61,19 @@ export function webDavClient(config: SyncConfig): WebDavClient {
   };
 }
 
+/** Clear local content for ids the backup lists as permanently deleted. Unknown ids are not stored. */
+export async function applyImportedPurges(ids: readonly string[], service: BookmarkService, repository: BookmarkRepository): Promise<number> {
+  let count = 0;
+  for (const id of ids) {
+    const current = await repository.findById(id);
+    if (!current || current.purgedAt) continue;
+    if (!current.deletedAt) await service.remove(id);
+    await service.purge(id);
+    count += 1;
+  }
+  return count;
+}
+
 /** Apply an import plan without turning an update into a second record. */
 export async function applyImportPlan(plan: ImportPlan, service: BookmarkService, repository: BookmarkRepository): Promise<number> {
   for (const entry of plan.entries) {
@@ -810,7 +823,8 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       const plan = planImport(parsed, existing, action);
       await applyImportPlan(plan, service, repository);
       for (const collection of parsed.collections as Collection[]) await repository.putCollection(collection);
-      return { ok: true, issues: plan.issues, imported: plan.entries.length, duplicateAction: action, choices: plan.issues.filter((issue) => issue.kind === 'duplicate').length };
+      const purged = await applyImportedPurges(parsed.purgedIds, service, repository);
+      return { ok: true, issues: plan.issues, imported: plan.entries.length, purged, duplicateAction: action, choices: plan.issues.filter((issue) => issue.kind === 'duplicate').length };
     });
     return undefined;
   });

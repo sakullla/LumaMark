@@ -24,6 +24,8 @@ export interface ImportIssue {
 export interface ImportResult {
   bookmarks: Bookmark[];
   collections: Collection[];
+  /** Permanent deletes named by the file. Import uses these ids and does not store their content. */
+  purgedIds: string[];
   issues: ImportIssue[];
 }
 
@@ -70,21 +72,66 @@ function hasToolbarAttribute(token: string): boolean {
   return /\bPERSONAL_TOOLBAR_FOLDER\s*=\s*(?:"true"|'true'|true)(?=[\s>])/i.test(token);
 }
 
+function purgedIdsIn(value: unknown, bookmarks: readonly Bookmark[] = []): string[] {
+  const listed = value && typeof value === 'object' && Array.isArray((value as { purged?: unknown }).purged)
+    ? (value as { purged: unknown[] }).purged
+    : [];
+  const ids = listed.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  for (const bookmark of bookmarks) {
+    if (bookmark.purgedAt && bookmark.id) ids.push(bookmark.id);
+  }
+  return [...new Set(ids)].sort();
+}
+
+/**
+ * Keep live folders, and deleted folders only when a backup bookmark still points at them.
+ * Folders that exist solely as delete records are left out.
+ */
+export function collectionsForExport(bookmarks: readonly Bookmark[], collections: readonly Collection[]): Collection[] {
+  const byId = new Map(collections.map((collection) => [collection.id, collection]));
+  const keep = new Set<string>();
+  const mark = (id: string | undefined) => {
+    const seen = new Set<string>();
+    let current = id ? byId.get(id) : undefined;
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      keep.add(current.id);
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+  };
+  for (const collection of collections) {
+    if (!collection.deletedAt) mark(collection.id);
+  }
+  for (const bookmark of bookmarks) {
+    if (!bookmark.purgedAt && bookmark.collectionId) mark(bookmark.collectionId);
+  }
+  return collections.filter((collection) => keep.has(collection.id)).map((collection) => migrateCollection(collection));
+}
+
 /** Parse a LumaMark JSON backup while retaining all valid records after bad entries. */
 export function parseLumaMarkJson(text: string): ImportResult {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    return { bookmarks: [], collections: [], issues: [{ kind: 'invalid-json', message: `Invalid JSON: ${String(error)}` }] };
+    return { bookmarks: [], collections: [], purgedIds: [], issues: [{ kind: 'invalid-json', message: `Invalid JSON: ${String(error)}` }] };
   }
   try {
     const backup = migrateExport(parsed);
-    return { bookmarks: [...backup.bookmarks], collections: [...backup.collections], issues: [] };
+    const purgedIds = purgedIdsIn(parsed, backup.bookmarks);
+    const purged = new Set(purgedIds);
+    const bookmarks = backup.bookmarks.filter((bookmark) => !bookmark.purgedAt && !purged.has(bookmark.id));
+    return {
+      bookmarks,
+      collections: collectionsForExport(bookmarks, backup.collections),
+      purgedIds,
+      issues: [],
+    };
   } catch (error) {
     const raw = parsed && typeof parsed === 'object' ? parsed as Partial<LumaMarkExport> : undefined;
     const bookmarks = Array.isArray(raw?.bookmarks) ? raw.bookmarks : [];
     const valid: Bookmark[] = [];
+    const seenPurged: Bookmark[] = [];
     const issues: ImportIssue[] = [{ kind: 'invalid-entry', message: String(error) }];
     bookmarks.forEach((value, index) => {
       try {
@@ -98,6 +145,10 @@ export function parseLumaMarkJson(text: string): ImportResult {
         }
         if (typeof item.revision !== 'number' || !Number.isInteger(item.revision) || item.revision < 1) {
           throw new Error('Bookmark revision must be a positive integer');
+        }
+        if (item.purgedAt) {
+          seenPurged.push(item);
+          return;
         }
         const url = normalizeBookmarkUrl(item.url);
         valid.push({
@@ -122,7 +173,8 @@ export function parseLumaMarkJson(text: string): ImportResult {
       }
     });
     const collections = Array.isArray(raw?.collections) ? raw.collections.map((collection) => migrateCollection(collection as Collection)) : [];
-    return { bookmarks: valid, collections, issues };
+    const purgedIds = purgedIdsIn(parsed, seenPurged);
+    return { bookmarks: valid, collections: collectionsForExport(valid, collections), purgedIds, issues };
   }
 }
 
@@ -221,17 +273,20 @@ export function parseBookmarksHtml(text: string): ImportResult {
   if (pendingFolder) issues.push({ kind: 'malformed-html', message: `Folder without content: ${pendingFolder}` });
   if (inAnchor) issues.push({ kind: 'malformed-html', message: 'Bookmark anchor is not closed' });
   if (inFolder) issues.push({ kind: 'malformed-html', message: 'Folder heading is not closed' });
-  return { bookmarks, collections, issues };
+  return { bookmarks, collections, purgedIds: [], issues };
 }
 
 export function exportLumaMarkJson(bookmarks: Bookmark[], collections: Collection[], now = new Date().toISOString()): string {
+  const purged = [...new Set(bookmarks.filter((bookmark) => bookmark.purgedAt && bookmark.id).map((bookmark) => bookmark.id))].sort();
+  const kept = bookmarks.filter((bookmark) => !bookmark.purgedAt);
   const payload: LumaMarkExport = {
     format: 'lumamark',
     schemaVersion: CURRENT_SCHEMA_VERSION,
     exportedAt: now,
-    bookmarks: bookmarks.map((bookmark) => migrateBookmark(bookmark)),
-    collections: collections.map((collection) => migrateCollection(collection)),
+    bookmarks: kept.map((bookmark) => migrateBookmark(bookmark)),
+    collections: collectionsForExport(kept, collections),
   };
+  if (purged.length) payload.purged = purged;
   return JSON.stringify(payload, null, 2);
 }
 

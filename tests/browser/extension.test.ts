@@ -266,7 +266,7 @@ describe('browser adapter', () => {
       put: async (item: typeof existing) => { records.set(item.id, item); },
       remove: async (id: string) => { records.delete(id); },
     };
-    const plan = planImport({ bookmarks: [imported], collections: [], issues: [] }, [existing], 'update');
+    const plan = planImport({ bookmarks: [imported], collections: [], purgedIds: [], issues: [] }, [existing], 'update');
     await applyImportPlan(plan, new BookmarkService(repository), repository);
     expect(records.size).toBe(1);
     expect(records.get(existing.id)?.title).toBe('New title');
@@ -526,6 +526,38 @@ describe('browser adapter', () => {
     expect((await repository.findById(looseCopy.id))?.purgedAt).toBeTruthy();
     expect(await repository.list()).toHaveLength(2);
     expect(await send('lumamark-restore', { ids: [looseCopy.id] })).toMatchObject({ ok: false });
+  });
+
+  it('exports permanent deletes as ids and applies them on import', async () => {
+    const repository = new IndexedDbRepository(`lumamark-export-${crypto.randomUUID()}`);
+    const stamp = new Date().toISOString();
+    const live = makeBookmark({ url: 'https://kept.example/a', title: 'Kept' });
+    const secret = makeBookmark({ url: 'https://secret.example/a', title: 'Secret title' });
+    await repository.put(live);
+    await repository.put({ ...secret, notes: 'Secret note', deletedAt: stamp, purgedAt: stamp, revision: 2 });
+    await repository.putCollection({ id: 'gone', name: 'Gone folder', position: 0, toolbar: false, createdAt: stamp, updatedAt: stamp, deletedAt: stamp, revision: 2 });
+    await repository.putCollection({ id: 'kept', name: 'Kept folder', position: 1, toolbar: false, createdAt: stamp, updatedAt: stamp, revision: 1 });
+    let listener: any;
+    startBackground({ runtime: { onMessage: { addListener: (callback: any) => { listener = callback; } } } } as never, repository);
+    const send = (type: string, payload?: unknown) => new Promise<any>((resolve) => listener({ type, payload }, {}, resolve));
+    const exported = await send('lumamark-export');
+    expect(exported.ok).toBe(true);
+    expect(exported.content).not.toContain('Secret');
+    expect(exported.content).not.toContain('Gone folder');
+    expect(exported.content).toContain(secret.id);
+    expect(exported.content).toContain('Kept folder');
+
+    const other = new IndexedDbRepository(`lumamark-import-${crypto.randomUUID()}`);
+    const revived = { ...secret, notes: 'Secret note', deletedAt: undefined, purgedAt: undefined, revision: 1 };
+    await other.put(revived);
+    let otherListener: any;
+    startBackground({ runtime: { onMessage: { addListener: (callback: any) => { otherListener = callback; } } } } as never, other);
+    const sendOther = (type: string, payload?: unknown) => new Promise<any>((resolve) => otherListener({ type, payload }, {}, resolve));
+    const imported = await sendOther('lumamark-import', { format: 'json', content: exported.content, action: 'skip' });
+    expect(imported).toMatchObject({ ok: true, purged: 1 });
+    expect(await other.findById(secret.id)).toMatchObject({ title: '', notes: '', url: 'https://deleted.invalid/' });
+    expect((await other.findById(secret.id))?.purgedAt).toBeTruthy();
+    expect((await other.listCollections()).map((item) => item.id)).toEqual(['kept']);
   });
 
   it('probes WebDAV, omits the password, and keeps the search address out of the sync manifest', async () => {

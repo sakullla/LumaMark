@@ -21,6 +21,11 @@ export interface SyncManifest {
   deviceId: string;
   bookmarks: Bookmark[];
   collections: Collection[];
+  /**
+   * Bookmark ids emptied from Trash. The id stays so another device cannot
+   * upload the old title, URL, or notes again. Content stays in local storage.
+   */
+  purged?: string[];
 }
 
 export interface RemoteSnapshot {
@@ -61,6 +66,9 @@ function preconditionFailed(error: unknown): boolean {
 
 function bookmarkSignature(bookmark: Bookmark): string {
   const item = migrateBookmark(bookmark);
+  // Permanent deletes match on id alone. A compact remote id and the local
+  // content-free record are the same delete, so sync does not rewrite them.
+  if (item.purgedAt) return JSON.stringify([item.id, 'purged']);
   return JSON.stringify([
     item.id,
     item.url,
@@ -182,6 +190,69 @@ function manifestFor(deviceId: string, bookmarks: Bookmark[], collections: Colle
   };
 }
 
+/** Bookmark id list, ignoring blanks and duplicates. */
+function sortedPurgedIds(ids: readonly string[] | undefined): string[] {
+  return [...new Set((ids ?? []).filter((id) => typeof id === 'string' && id))].sort();
+}
+
+function purgedBookmark(id: string, purgedAt: string): Bookmark {
+  return {
+    id,
+    url: 'https://deleted.invalid/',
+    title: '',
+    domain: '',
+    notes: '',
+    tags: [],
+    favorite: false,
+    position: 0,
+    createdAt: purgedAt,
+    updatedAt: purgedAt,
+    deletedAt: purgedAt,
+    purgedAt,
+    revision: 1,
+  };
+}
+
+/**
+ * Rebuild permanent deletes from a compact id list. An inline tombstone is kept
+ * as-is so an older file still merges. A live record with the same id loses.
+ */
+export function expandSyncBookmarks(bookmarks: readonly Bookmark[] = [], purged: readonly string[] = []): Bookmark[] {
+  const byId = new Map<string, Bookmark>();
+  for (const item of bookmarks) {
+    if (item?.id) byId.set(item.id, migrateBookmark(item));
+  }
+  for (const id of sortedPurgedIds(purged)) {
+    const existing = byId.get(id);
+    if (existing?.purgedAt) continue;
+    byId.set(id, purgedBookmark(id, existing?.updatedAt || '1970-01-01T00:00:00.000Z'));
+  }
+  return [...byId.values()];
+}
+
+/** Move permanent deletes out of `bookmarks` so the file keeps ids, not contents. */
+export function compactSyncManifest(manifest: SyncManifest): SyncManifest {
+  const bookmarks: Bookmark[] = [];
+  const purged: string[] = [...(manifest.purged ?? [])];
+  for (const item of manifest.bookmarks) {
+    if (item.purgedAt) purged.push(item.id);
+    else bookmarks.push(item);
+  }
+  const ids = sortedPurgedIds(purged);
+  const next: SyncManifest = { ...manifest, bookmarks };
+  if (ids.length) next.purged = ids;
+  else delete next.purged;
+  return next;
+}
+
+function encodingMatches(remote: SyncManifest | undefined, compacted: SyncManifest): boolean {
+  if (!remote || remote.schemaVersion !== CURRENT_SCHEMA_VERSION) return false;
+  if (remote.bookmarks.some((item) => item.purgedAt)) return false;
+  const left = sortedPurgedIds(remote.purged);
+  const right = sortedPurgedIds(compacted.purged);
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 function conflictIndexes(conflicts: readonly ConflictRecord[]): {
   unresolvedByBookmark: Map<string, ConflictRecord>;
   resolvedByBookmark: Map<string, ConflictRecord>;
@@ -276,7 +347,7 @@ export class WebDavSyncEngine {
         if (status !== 404 && !/\b404\b|not found/i.test(message)) throw error;
         remoteSnapshot = {};
       }
-      const remote = (remoteSnapshot.manifest?.bookmarks ?? []).map((item) => migrateBookmark(item));
+      const remote = expandSyncBookmarks(remoteSnapshot.manifest?.bookmarks ?? [], remoteSnapshot.manifest?.purged ?? []);
       const remoteCollections = (remoteSnapshot.manifest?.collections ?? []).map((item) => migrateCollection(item));
       const byId = new Map(local.map((item) => [item.id, item]));
       const remoteById = new Map(remote.map((item) => [item.id, item]));
@@ -398,12 +469,12 @@ export class WebDavSyncEngine {
       }
 
       const now = new Date().toISOString();
-      const manifest = manifestFor(
+      const manifest = compactSyncManifest(manifestFor(
         before.deviceId,
         [...merged.values()].map((item) => migrateBookmark(item)),
         [...mergedCollections.values()].map((item) => migrateCollection(item)),
         now,
-      );
+      ));
       // A rejected WebDAV write must not change local titles or deletedAt.
       const persistAdopted = async (): Promise<void> => {
         for (const item of pendingCollections) await this.repository.putCollection(item);
@@ -414,7 +485,8 @@ export class WebDavSyncEngine {
           && !pendingBookmarks.length && !pendingCollections.length
           && remote.length === merged.size && remoteCollections.length === mergedCollections.size
           && remote.every((item) => equalBookmark(item, merged.get(item.id)!))
-          && remoteCollections.every((item) => equalCollection(item, mergedCollections.get(item.id)!));
+          && remoteCollections.every((item) => equalCollection(item, mergedCollections.get(item.id)!))
+          && encodingMatches(remoteSnapshot.manifest, manifest);
         if (!remoteAlreadyMatches) await this.client.write(manifest, remoteSnapshot.etag);
         await persistAdopted();
         const metadata: SyncMetadata = {

@@ -162,8 +162,23 @@ describe('WebDavSyncEngine', () => {
       bookmarks: [{ ...original, deletedAt: undefined, revision: 100 }], collections: [],
     };
     expect((await new WebDavSyncEngine(repository, client).sync()).status).toBe('idle');
-    expect(client.snapshot.manifest?.bookmarks[0]).toMatchObject({ title: '', notes: '', url: 'https://deleted.invalid/' });
-    expect(client.snapshot.manifest?.bookmarks[0].purgedAt).toBeTruthy();
+    expect(client.snapshot.manifest?.bookmarks).toEqual([]);
+    expect(client.snapshot.manifest?.purged).toEqual([original.id]);
+    expect(JSON.stringify(client.snapshot.manifest)).not.toContain('Private');
+    expect((await repository.findById(original.id))?.url).toBe('https://deleted.invalid/');
+
+    client.failWrite = true;
+    expect((await new WebDavSyncEngine(repository, client).sync()).status).toBe('idle');
+
+    const other = new MemoryRepository();
+    await other.put({ ...original, deletedAt: undefined, title: 'Private title', notes: 'Private note', revision: 100 });
+    const follow = new MemoryClient();
+    follow.snapshot = { manifest: client.snapshot.manifest, etag: client.snapshot.etag };
+    expect((await new WebDavSyncEngine(other, follow).sync()).status).toBe('idle');
+    expect(await other.findById(original.id)).toMatchObject({ title: '', notes: '', url: 'https://deleted.invalid/' });
+    expect((await other.findById(original.id))?.purgedAt).toBeTruthy();
+    expect(follow.snapshot.manifest?.purged).toEqual([original.id]);
+    expect(JSON.stringify(follow.snapshot.manifest)).not.toContain('Private');
   });
 
   const collection = (

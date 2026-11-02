@@ -63,7 +63,8 @@ export class BookmarkService {
     const current = await this.repository.findById(id);
     if (!current?.deletedAt || current.purgedAt) throw new Error('Bookmark is not in Trash');
     const now = new Date().toISOString();
-    // Keep a content-free deletion record so an offline device cannot resurrect it.
+    // Keep a content-free local record so an offline device cannot resurrect it.
+    // The sync file stores only the id.
     const purged: Bookmark = {
       id, url: 'https://deleted.invalid/', title: '', domain: '', notes: '', tags: [],
       favorite: false, position: 0, createdAt: current.createdAt,

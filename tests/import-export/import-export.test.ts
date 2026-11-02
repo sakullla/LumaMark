@@ -19,6 +19,44 @@ describe('import/export', () => {
     expect(result.issues[0].kind).toBe('invalid-json');
   });
 
+  it('leaves Trash in a backup and records permanent deletes as ids', () => {
+    const stamp = '2024-03-01T00:00:00.000Z';
+    const live = makeBookmark({ url: 'https://example.test/live', title: 'Live', collectionId: 'live-folder' });
+    const trashed = { ...makeBookmark({ url: 'https://example.test/trash', title: 'Trash', collectionId: 'trash-folder' }), deletedAt: stamp };
+    const purged = {
+      ...makeBookmark({ url: 'https://example.test/secret', title: 'Secret title', collectionId: 'gone-folder' }),
+      notes: 'Secret note',
+      deletedAt: stamp,
+      purgedAt: '2024-03-02T00:00:00.000Z',
+    };
+    const folder = (id: string, deletedAt?: string) => ({
+      id, name: id, position: 0, toolbar: false, createdAt: stamp, updatedAt: stamp, revision: 1, ...(deletedAt ? { deletedAt } : {}),
+    });
+    const text = exportLumaMarkJson(
+      [live, trashed, purged],
+      [folder('live-folder'), folder('trash-folder', stamp), folder('gone-folder', stamp), folder('empty-deleted', stamp)],
+    );
+    expect(text).not.toContain('Secret');
+    expect(text).not.toContain('secret');
+    expect(text).not.toContain('gone-folder');
+    expect(text).not.toContain('empty-deleted');
+    const parsed = parseLumaMarkJson(text);
+    expect(parsed.bookmarks.map((item) => item.title).sort()).toEqual(['Live', 'Trash']);
+    expect(parsed.bookmarks.find((item) => item.title === 'Trash')?.deletedAt).toBe(stamp);
+    expect(parsed.purgedIds).toEqual([purged.id]);
+    expect(parsed.collections.map((item) => item.id).sort()).toEqual(['live-folder', 'trash-folder']);
+    const legacy = parseLumaMarkJson(JSON.stringify({
+      format: 'lumamark',
+      schemaVersion: 2,
+      exportedAt: '2024-03-02T00:00:00.000Z',
+      bookmarks: [live, purged],
+      collections: [folder('gone-folder', stamp)],
+    }));
+    expect(legacy.bookmarks.map((item) => item.id)).toEqual([live.id]);
+    expect(legacy.purgedIds).toEqual([purged.id]);
+    expect(legacy.collections).toEqual([]);
+  });
+
   it('round trips LumaMark JSON and makes explicit duplicate plans', () => {
     const bookmark = makeBookmark({ url: 'https://example.test', title: 'Example', tags: ['one'] });
     const text = exportLumaMarkJson([bookmark], []);
