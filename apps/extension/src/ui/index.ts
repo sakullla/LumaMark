@@ -116,7 +116,8 @@ export function collectionOptions(collections: Collection[], selected = '', lang
     for (const node of nodes) {
       const prefix = depth ? `${'· '.repeat(depth)}` : '';
       const mark = node.toolbar && node.name !== text.toolbarMark ? ` (${text.toolbarMark})` : '';
-      lines.push(`<option value="${escapeHtml(node.id)}"${node.id === selected ? ' selected' : ''}>${escapeHtml(prefix + node.name + mark)}</option>`);
+      const toolbar = node.toolbar ? ' data-toolbar="true"' : '';
+      lines.push(`<option value="${escapeHtml(node.id)}" data-depth="${depth}"${toolbar}${node.id === selected ? ' selected' : ''}>${escapeHtml(prefix + node.name + mark)}</option>`);
       walk(node.children, depth + 1);
     }
   };
@@ -375,6 +376,18 @@ function dialogFrame(id: string, labelledBy: string, body: string, extra = ''): 
   return `<dialog id="${id}" class="dialog" aria-labelledby="${labelledBy}"${extra}>${body}</dialog>`;
 }
 
+/** Searchable folder menu. The select keeps the form value; the button opens the custom list. */
+function folderPickerField(id: string, name: string, options: string, text: ReturnType<typeof copyFor>): string {
+  const named = name ? ` name="${name}"` : '';
+  return `<div class="folder-picker">` +
+    `<select id="${id}"${named} class="folder-picker-native sr-only" tabindex="-1" aria-hidden="true">${options}</select>` +
+    `<button type="button" id="${id}-trigger" class="folder-picker-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="${id}-list">` +
+    `<span class="folder-picker-icon" aria-hidden="true"></span><span class="folder-picker-value"></span>${uiIcon('chevronDown', 'ui-icon folder-picker-chevron')}</button>` +
+    `<div id="${id}-panel" class="folder-popover" popover="manual">` +
+    `<div class="list-search">${searchIcon()}<input id="${id}-search" type="search" autocomplete="off" spellcheck="false" placeholder="${escapeHtml(text.searchFolders)}" aria-label="${escapeHtml(text.searchFolders)}" aria-autocomplete="list" aria-controls="${id}-list"></div>` +
+    `<div id="${id}-list" class="pick-list" role="listbox" aria-label="${escapeHtml(text.folders)}"></div></div></div>`;
+}
+
 export function libraryDocument(collections: Collection[] = [], language: UiLanguage = 'en'): string {
   const text = copyFor(language);
   const viewButton = (view: LibraryView, label: string, icon: UiIconName, pressed = false) =>
@@ -418,7 +431,7 @@ export function libraryDocument(collections: Collection[] = [], language: UiLang
 
     `<form id="editor" class="form-grid" hidden aria-labelledby="editor-heading"><div class="editor-head"><span id="editor-icon" class="editor-icon" aria-hidden="true"></span><h2 id="editor-heading" class="dialog-title">${escapeHtml(text.editBookmark)}</h2><button type="button" id="editor-copy" class="icon-button" title="${escapeHtml(text.copyLink)}" aria-label="${escapeHtml(text.copyLink)}">${uiIcon('link')}</button><a id="editor-open" class="icon-link" target="_blank" rel="noreferrer" title="${escapeHtml(text.openPage)}" aria-label="${escapeHtml(text.openPage)}">${uiIcon('external')}</a><button type="button" id="editor-close" class="icon-button" title="${escapeHtml(text.close)}" aria-label="${escapeHtml(text.close)}">${uiIcon('x')}</button></div>` +
     `<label for="editor-title">${escapeHtml(text.titleLabel)}</label><input id="editor-title" name="title" type="text"><label for="editor-url">${escapeHtml(text.urlLabel)}</label><input id="editor-url" name="url" type="url">` +
-    `<label for="editor-folder">${escapeHtml(text.folder)}</label><select id="editor-folder" name="folder"><option value="">${escapeHtml(text.topLevel)}</option>${collectionOptions(collections, '', language)}</select>` +
+    `<label for="editor-folder-trigger">${escapeHtml(text.folder)}</label>${folderPickerField('editor-folder', 'folder', `<option value="">${escapeHtml(text.unfiled)}</option>${collectionOptions(collections, '', language)}`, text)}` +
     `<label for="editor-tags">${escapeHtml(text.tags)}</label><input id="editor-tags" name="tags" type="text" autocomplete="off"><div id="editor-tag-suggestions" class="tag-suggestions" hidden></div><label for="editor-notes">${escapeHtml(text.notes)}</label><textarea id="editor-notes" name="notes" rows="4"></textarea>` +
     `<label class="check-line" for="editor-favorite"><input id="editor-favorite" name="favorite" type="checkbox"> ${escapeHtml(text.favorite)}</label><p id="editor-error" role="status"></p><p id="editor-meta" class="editor-meta"></p>` +
     `<div class="button-row dialog-actions"><button type="button" id="editor-delete" class="danger">${escapeHtml(text.delete)}</button><span class="spacer"></span><button type="button" id="editor-cancel" class="ghost">${escapeHtml(text.cancel)}</button><button type="submit" class="primary">${escapeHtml(text.saveChanges)}</button></div></form>` +
@@ -427,7 +440,7 @@ export function libraryDocument(collections: Collection[] = [], language: UiLang
 
     dialogFrame('name-dialog', 'name-heading', `<form id="name-form" method="dialog"><h2 id="name-heading" class="dialog-title"></h2><label for="name-input">${escapeHtml(text.nameLabel)}</label><input id="name-input" type="text" autocomplete="off"><div class="button-row dialog-actions"><button type="button" id="name-cancel" class="ghost">${escapeHtml(text.cancel)}</button><button type="submit" class="primary">${escapeHtml(text.save)}</button></div></form>`, ' data-size="small"') +
 
-    dialogFrame('add-dialog', 'add-heading', `<form id="add-form" method="dialog"><h2 id="add-heading" class="dialog-title">${escapeHtml(text.addBookmark)}</h2><p class="form-note">${escapeHtml(text.addBookmarkHelp)}</p><label for="add-url">${escapeHtml(text.urlLabel)}</label><input id="add-url" type="text" inputmode="url" autocomplete="off" placeholder="https://"><label for="add-title">${escapeHtml(text.titleLabel)}</label><input id="add-title" type="text" autocomplete="off"><label for="add-folder">${escapeHtml(text.folder)}</label><select id="add-folder"></select><label for="add-tags">${escapeHtml(text.tags)}</label><input id="add-tags" type="text" list="tag-options" autocomplete="off" placeholder="work, reading"><p id="add-error" class="form-error" role="status"></p><div class="button-row dialog-actions"><button type="button" id="add-cancel" class="ghost">${escapeHtml(text.cancel)}</button><button type="submit" class="primary">${escapeHtml(text.save)}</button></div></form>`) +
+    dialogFrame('add-dialog', 'add-heading', `<form id="add-form" method="dialog"><h2 id="add-heading" class="dialog-title">${escapeHtml(text.addBookmark)}</h2><p class="form-note">${escapeHtml(text.addBookmarkHelp)}</p><label for="add-url">${escapeHtml(text.urlLabel)}</label><input id="add-url" type="text" inputmode="url" autocomplete="off" placeholder="https://"><label for="add-title">${escapeHtml(text.titleLabel)}</label><input id="add-title" type="text" autocomplete="off"><label for="add-folder-trigger">${escapeHtml(text.folder)}</label>${folderPickerField('add-folder', '', '', text)}<label for="add-tags">${escapeHtml(text.tags)}</label><input id="add-tags" type="text" list="tag-options" autocomplete="off" placeholder="work, reading"><p id="add-error" class="form-error" role="status"></p><div class="button-row dialog-actions"><button type="button" id="add-cancel" class="ghost">${escapeHtml(text.cancel)}</button><button type="submit" class="primary">${escapeHtml(text.save)}</button></div></form>`) +
 
     `<dialog id="move-dialog" class="dialog dialog-list" aria-labelledby="move-heading"><h2 id="move-heading" class="dialog-title"></h2><div class="list-search">${searchIcon()}<input id="move-search" type="text" role="combobox" aria-expanded="true" aria-controls="move-list" autocomplete="off" placeholder="${escapeHtml(text.searchFolders)}"></div><div id="move-list" class="pick-list" role="listbox" aria-label="${escapeHtml(text.folders)}"></div></dialog>` +
 

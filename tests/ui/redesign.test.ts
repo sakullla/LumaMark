@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { makeBookmark, type Collection } from '../../packages/domain/src/index';
+import { folderChoiceLabel } from '../../apps/extension/src/ui/folder-picker';
 import { folderCounts, libraryDocument, popupDocument, renderBookmarkCard, renderFolderTree, settingsDocument, tileHue } from '../../apps/extension/src/ui/index';
 import { bookmarkCountLabel, copyFor, fill, relativeTime } from '../../apps/extension/src/ui/copy';
 import { popupRuntimeMessage } from '../../apps/extension/src/pages/popup';
@@ -46,6 +47,18 @@ describe('redesigned surfaces', () => {
     expect(tree).toContain('data-select-folder="dev"');
     expect(tree).toContain('aria-pressed="true"');
     expect(tree).toContain('class="toolbar-mark"');
+  });
+
+  it('uses a searchable folder picker in the library editor and new-bookmark dialog', () => {
+    const library = libraryDocument([folder('dev', 'Dev')]);
+    expect(library).toContain('class="folder-picker"');
+    expect(library).toContain('id="editor-folder" name="folder"');
+    expect(library).toContain('for="editor-folder-trigger"');
+    expect(library).toContain('id="editor-folder-panel" class="folder-popover" popover="manual"');
+    expect(library).toContain('id="add-folder-trigger"');
+    expect(library).toContain('data-depth="0"');
+    expect(folderChoiceLabel('· · Dev', 2)).toBe('Dev');
+    expect(folderChoiceLabel('· 未归类', 0)).toBe('· 未归类');
   });
 
   it('renders tags and notes on cards with escaped content and a stable letter tile', () => {

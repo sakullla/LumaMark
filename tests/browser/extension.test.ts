@@ -682,6 +682,146 @@ describe('browser adapter', () => {
     }
   });
 
+  it('publishes library edits to WebDAV without waiting for the five-minute alarm', async () => {
+    const repository = new IndexedDbRepository(`lumamark-push-${crypto.randomUUID()}`);
+    const folder: Collection = {
+      id: 'folder-sites',
+      name: 'Sites',
+      position: 0,
+      toolbar: false,
+      createdAt: '2026-03-01T00:00:00.000Z',
+      updatedAt: '2026-03-01T00:00:00.000Z',
+      revision: 1,
+    };
+    const local = makeBookmark({
+      id: 'kite',
+      url: 'https://kite.663717.xyz/',
+      title: 'Kite draft',
+      notes: '',
+      tags: [],
+      collectionId: folder.id,
+      favorite: false,
+    }, '2026-03-01T00:00:00.000Z');
+    const remoteOnly = makeBookmark({
+      id: 'remote-only',
+      url: 'https://remote.example/page',
+      title: 'From other device',
+    }, '2026-03-01T00:00:00.000Z');
+    await repository.putCollection(folder);
+    await repository.put(local);
+    await repository.setSyncConfig({
+      key: 'sync-config',
+      url: 'https://dav.example/sync',
+      path: 'lumamark.json',
+      username: 'me',
+      password: 'pw',
+      autoSync: true,
+    });
+    const puts: string[] = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'PUT') {
+        puts.push(String(init?.body ?? ''));
+        return new Response('{}', { status: 200, headers: { etag: 'W/"1"' } });
+      }
+      return new Response(JSON.stringify({
+        format: 'lumamark-sync',
+        schemaVersion: 2,
+        generatedAt: '2026-03-01T00:00:00.000Z',
+        deviceId: 'other-device',
+        bookmarks: [remoteOnly],
+        collections: [],
+      }), { status: 200, headers: { etag: 'W/"0"', 'content-type': 'application/json' } });
+    });
+    const timeouts = vi.spyOn(globalThis, 'setTimeout');
+    vi.stubGlobal('fetch', fetchMock);
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean | void) | undefined;
+    let onAlarm: ((alarm: { name: string }) => void) | undefined;
+    try {
+      startBackground({
+        i18n: { getUILanguage: () => 'zh-CN' },
+        tabs: { query: vi.fn().mockResolvedValue([]), create: vi.fn() },
+        alarms: {
+          create: vi.fn(async () => {}),
+          get: vi.fn(async () => undefined),
+          clear: vi.fn(async () => true),
+          onAlarm: { addListener: (callback: typeof onAlarm) => { onAlarm = callback; } },
+        },
+        runtime: { onMessage: { addListener: (callback: typeof listener) => { listener = callback; } } },
+      }, repository);
+      const send = (message: unknown) => new Promise<any>((resolve) => { listener?.(message, {}, resolve); });
+      const scheduledPushes = () => timeouts.mock.calls
+        .map((call, index) => ({
+          delay: call[1],
+          run: call[0] as () => void,
+          id: timeouts.mock.results[index]?.value as ReturnType<typeof setTimeout>,
+        }))
+        .filter((entry) => entry.delay === 15_000);
+      const runLatestPush = async () => {
+        const latest = scheduledPushes().at(-1);
+        expect(latest).toBeDefined();
+        clearTimeout(latest!.id);
+        const before = puts.length;
+        latest!.run();
+        await vi.waitFor(() => expect(puts.length).toBeGreaterThan(before));
+        return JSON.parse(puts.at(-1)!) as {
+          bookmarks: Array<Record<string, unknown>>;
+          collections: Array<Record<string, unknown>>;
+        };
+      };
+
+      expect(scheduledPushes()).toHaveLength(0);
+      const edited = await send({
+        type: 'lumamark-update',
+        payload: {
+          id: local.id,
+          update: {
+            title: 'Kite',
+            url: 'https://kite.663717.xyz/docs',
+            notes: '  launch notes  ',
+            tags: ['Build', 'site'],
+            favorite: true,
+            collectionId: folder.id,
+          },
+        },
+      });
+      expect(edited.ok).toBe(true);
+      expect(scheduledPushes()).toHaveLength(1);
+
+      const published = await runLatestPush();
+      const kite = published.bookmarks.find((item) => item.id === local.id);
+      expect(kite).toMatchObject({
+        title: 'Kite',
+        url: 'https://kite.663717.xyz/docs',
+        notes: 'launch notes',
+        tags: ['build', 'site'],
+        favorite: true,
+        collectionId: folder.id,
+      });
+      expect(published.bookmarks.some((item) => item.id === remoteOnly.id)).toBe(true);
+      await vi.waitFor(async () => {
+        expect(await repository.findById(remoteOnly.id)).toMatchObject({ title: 'From other device' });
+      });
+      // Adopting the remote bookmark writes the store and must not schedule another push.
+      expect(scheduledPushes()).toHaveLength(1);
+      expect(onAlarm).toBeTypeOf('function');
+
+      const renamed = await send({ type: 'lumamark-collection-update', payload: { id: folder.id, name: '建站' } });
+      expect(renamed.ok).toBe(true);
+      expect(scheduledPushes()).toHaveLength(2);
+      const folders = await runLatestPush();
+      expect(folders.collections.find((item) => item.id === folder.id)).toMatchObject({ name: '建站' });
+
+      const removed = await send({ type: 'lumamark-delete', payload: { id: local.id } });
+      expect(removed.ok).toBe(true);
+      expect(scheduledPushes()).toHaveLength(3);
+      const trashed = await runLatestPush();
+      expect(trashed.bookmarks.find((item) => item.id === local.id)?.deletedAt).toEqual(expect.any(String));
+    } finally {
+      timeouts.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('keeps a live bookmark when the same URL also has a deleted tombstone', async () => {
     const repository = new IndexedDbRepository(`lumamark-live-${crypto.randomUUID()}`);
     const now = '2026-03-01T00:00:00.000Z';

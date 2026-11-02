@@ -22,6 +22,7 @@ import { bookmarkCountLabel, copyFor, detectUiLanguage, fill, fillCount, relativ
 import { createContextMenu, type MenuEntry } from '../ui/context-menu';
 import { uiIcon, watchIconFallback, type UiIconName } from '../ui/icons';
 import { applyPreferences, readPreferences, resolvedTheme, savePreference } from '../ui/theme';
+import { bindFolderPicker } from '../ui/folder-picker';
 import { escapeHtml } from '../ui/html';
 import { dropIntent, homeSyncPhrase, isHttpUrl } from '../ui/bar';
 import {
@@ -132,6 +133,8 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   let tagsExpanded = false;
 
   const get = <T extends Element = HTMLElement>(selector: string) => root.querySelector<T>(selector);
+  bindFolderPicker(get<HTMLSelectElement>('#editor-folder'), text);
+  bindFolderPicker(get<HTMLSelectElement>('#add-folder'), text);
   const results = () => get('#results');
   const status = () => get('#library-status');
   const scroller = () => get('.library-main');

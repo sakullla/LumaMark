@@ -338,6 +338,7 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
   };
   let nativeTimer: ReturnType<typeof setTimeout> | undefined;
   let pushTimer: ReturnType<typeof setTimeout> | undefined;
+  let pushSuppressed = 0;
   let lastNative: { at?: string; report?: ReconcileReport; error?: string } = {};
   let nativeEnabledMemory = true;
   const nativeEnabled = async (): Promise<boolean> => {
@@ -377,15 +378,21 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
   const sync = async () => {
     const config = syncConfig ?? await loadSyncConfig();
     if (!config?.url) return { ok: false, status: 'error' as const, error: 'WebDAV is not configured', retryable: false };
-    await reconcile();
-    const engine = new WebDavSyncEngine(repository, webDavClient(config));
-    let result = await engine.sync();
-    const postReconcile = await reconcile();
-    if (result.status === 'idle' && postReconcile?.repoChanges) {
-      result = await engine.sync();
+    // Adopting the remote snapshot writes the store. Those writes must not schedule another push.
+    pushSuppressed += 1;
+    try {
       await reconcile();
+      const engine = new WebDavSyncEngine(repository, webDavClient(config));
+      let result = await engine.sync();
+      const postReconcile = await reconcile();
+      if (result.status === 'idle' && postReconcile?.repoChanges) {
+        result = await engine.sync();
+        await reconcile();
+      }
+      return result;
+    } finally {
+      pushSuppressed -= 1;
     }
-    return result;
   };
   let syncInFlight: ReturnType<typeof sync> | undefined;
   const runSync = (): ReturnType<typeof sync> => {
@@ -394,7 +401,7 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
     }
     return syncInFlight;
   };
-  // Publish browser-side changes soon instead of waiting for the next alarm.
+  // Publish library edits and browser-side changes soon instead of waiting for the next alarm.
   function schedulePush() {
     if (pushTimer) clearTimeout(pushTimer);
     pushTimer = setTimeout(() => {
@@ -408,7 +415,13 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
   for (const event of [nativeApi?.onCreated, nativeApi?.onRemoved, nativeApi?.onChanged, nativeApi?.onMoved, nativeApi?.onChildrenReordered, nativeApi?.onImportEnded]) {
     event?.addListener(() => queueReconcile());
   }
-  onStoreWrite = () => queueReconcile(150);
+  onStoreWrite = () => {
+    queueReconcile(150);
+    // Sync adopts remote rows through this same proxy. Those writes are not new local edits.
+    // Explicit callers (native reconcile, conflict resolve, purge) still schedule while a sync runs.
+    if (pushSuppressed) return;
+    schedulePush();
+  };
   queueReconcile(0);
   const runAutoSync = async () => {
     const config = syncConfig ?? await loadSyncConfig();
