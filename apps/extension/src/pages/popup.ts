@@ -4,6 +4,7 @@ import { copyFor, detectUiLanguage, fill } from '../ui/copy';
 import { titleInitial, toolbarFolder } from '../ui/bar';
 import { escapeHtml } from '../ui/html';
 import { bindIconFallback, uiIcon } from '../ui/icons';
+import { bindFolderPicker } from '../ui/folder-picker';
 import { folderPaths, parseTags, tagCounts } from '../ui/library-model';
 
 export interface RuntimePort {
@@ -149,8 +150,33 @@ export function mountPopup(root: ParentNode = document, port: RuntimePort = glob
     const select = root.querySelector<HTMLSelectElement>('#save-folder');
     if (!id || !select) return;
     select.value = id;
-    paintRecentFolders();
+    // The change event repaints the chips and the picker button together.
+    select.dispatchEvent(new Event('change', { bubbles: true }));
   });
+
+  /** A folder typed into either picker is made inside the bar folder, where a plain save lands, then listed in both pickers. */
+  const createFolder = async (name: string): Promise<string | undefined> => {
+    try {
+      const response = await sendRuntime(port, 'collection-create', { name, parentId: toolbarFolder(collections)?.id });
+      const id: string | undefined = response?.item?.id;
+      if (!id) { setStatus(text.notSaved); return undefined; }
+      const saveSelect = root.querySelector<HTMLSelectElement>('#save-folder');
+      const editSelect = root.querySelector<HTMLSelectElement>('#edit-folder');
+      const keepSave = saveSelect?.value ?? '';
+      const keepEdit = editSelect?.value ?? '';
+      await loadFolders(keepEdit);
+      if (saveSelect) {
+        const top = saveSelect.querySelector('option[value=""]') ? `<option value="">${escapeHtml(text.topLevel)}</option>` : '';
+        saveSelect.innerHTML = `${top}${collectionOptions(collections, keepSave, detectUiLanguage())}`;
+      }
+      return id;
+    } catch {
+      setStatus(text.notSaved);
+      return undefined;
+    }
+  };
+  bindFolderPicker(root.querySelector<HTMLSelectElement>('#save-folder'), text, { create: createFolder });
+  bindFolderPicker(root.querySelector<HTMLSelectElement>('#edit-folder'), text, { create: createFolder });
 
   const addSuggestion = (tag: string) => {
     const input = root.querySelector<HTMLInputElement>('#save-tags');

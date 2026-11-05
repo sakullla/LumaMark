@@ -22,9 +22,9 @@ import { bookmarkCountLabel, copyFor, detectUiLanguage, fill, fillCount, relativ
 import { createContextMenu, type MenuEntry } from '../ui/context-menu';
 import { uiIcon, watchIconFallback, type UiIconName } from '../ui/icons';
 import { applyPreferences, readPreferences, resolvedTheme, savePreference } from '../ui/theme';
-import { bindFolderPicker } from '../ui/folder-picker';
+import { bindFolderPicker, pickerAncestors, pickerCreateHtml, pickerExpandedState, pickerRowHtml, pickerRows, type PickerOption, type PickerRow } from '../ui/folder-picker';
 import { escapeHtml } from '../ui/html';
-import { dropIntent, homeSyncPhrase, isHttpUrl } from '../ui/bar';
+import { dropIntent, folderTree, homeSyncPhrase, isHttpUrl, toolbarFolder, type FolderNode } from '../ui/bar';
 import {
   aliveFolderIds,
   deletedBookmarks,
@@ -133,8 +133,18 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   let tagsExpanded = false;
 
   const get = <T extends Element = HTMLElement>(selector: string) => root.querySelector<T>(selector);
-  bindFolderPicker(get<HTMLSelectElement>('#editor-folder'), text);
-  bindFolderPicker(get<HTMLSelectElement>('#add-folder'), text);
+  /** Typing a new name into a folder picker makes it inside the bar folder, like a save from the popup. */
+  const createPickedFolder = async (name: string): Promise<string | undefined> => {
+    const response = await sendRuntime(port, 'collection-create', { name, parentId: toolbarFolder(collections)?.id });
+    const id: string | undefined = response?.item?.id;
+    if (!id) { say(text.notSaved); return undefined; }
+    await load();
+    const add = get<HTMLSelectElement>('#add-folder');
+    if (add) add.innerHTML = `<option value="">${escapeHtml(text.unfiled)}</option>${collectionOptions(collections, add.value, language)}`;
+    return id;
+  };
+  bindFolderPicker(get<HTMLSelectElement>('#editor-folder'), text, { create: createPickedFolder });
+  bindFolderPicker(get<HTMLSelectElement>('#add-folder'), text, { create: createPickedFolder });
   const results = () => get('#results');
   const status = () => get('#library-status');
   const scroller = () => get('.library-main');
@@ -1365,56 +1375,108 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   };
 
   // ── Move picker ──
-  type PickRow = { value: string; label: string; detail?: string; icon: UiIconName; create?: string };
-  /** A list that answers to typing, because a <select> stops being usable around the fiftieth folder. */
-  const pickFolder = (title: string, base: PickRow[], folders: readonly Collection[]) => new Promise<string | undefined>((resolve) => {
+  type PickBase = { value: string; label: string; icon: UiIconName };
+  type MoveRow = { kind: 'folder'; row: PickerRow } | { kind: 'create'; name: string };
+  /** The same collapsible, searchable tree as the inline pickers, because a flat list stops being usable around the fiftieth folder. */
+  const pickFolder = (title: string, base: PickBase[], folders: readonly Collection[]) => new Promise<string | undefined>((resolve) => {
     const dialog = get<HTMLDialogElement>('#move-dialog');
     const heading = get('#move-heading');
     const input = get<HTMLInputElement>('#move-search');
     const list = get('#move-list');
     if (!dialog || !input || !list) { resolve(undefined); return; }
     if (heading) heading.textContent = title;
-    const pathsNow = folderPaths(collections);
-    const sorted = [...folders].sort((left, right) => (pathsNow.get(left.id) ?? '').localeCompare(pathsNow.get(right.id) ?? ''));
-    const everything: PickRow[] = [...base, ...sorted.map((folder) => ({ value: folder.id, label: folder.name, detail: pathsNow.get(folder.id) === folder.name ? undefined : pathsNow.get(folder.id), icon: 'folder' as const }))];
-    let rows: PickRow[] = [];
+    const options: PickerOption[] = [...base.map((item) => ({ value: item.value, label: item.label, depth: 0, toolbar: false, icon: item.icon }))];
+    const walk = (nodes: FolderNode[], depth: number) => nodes.forEach((node) => {
+      options.push({ value: node.id, label: node.name, depth, toolbar: node.toolbar });
+      walk(node.children, depth + 1);
+    });
+    walk(folderTree(folders), 0);
+    const store = pickerExpandedState(() => options.filter((option) => option.toolbar).map((option) => option.value));
+    const expanded = store.get();
+    // Where the items live now is the likeliest neighbourhood for where they go next.
+    const here = scope.kind === 'folder' ? scope.id : '';
+    for (const id of pickerAncestors(options, here)) expanded.add(id);
+    let rows: MoveRow[] = [];
     let active = 0;
+    const build = () => {
+      const query = input.value.trim();
+      rows = pickerRows(options, { query, expanded }).map((row) => ({ kind: 'folder' as const, row }));
+      if (query && !options.some((option) => option.label.toLowerCase() === query.toLowerCase())) rows.push({ kind: 'create', name: query });
+    };
+    const indexOf = (value: string) => rows.findIndex((item) => item.kind === 'folder' && item.row.value === value);
     const paint = () => {
-      const query = input.value.trim().toLowerCase();
-      rows = everything.filter((row) => `${row.label} ${row.detail ?? ''}`.toLowerCase().includes(query));
-      if (query && !everything.some((row) => row.label.toLowerCase() === query)) rows.push({ value: '', label: fill(text.createNamed, { v: input.value.trim() }), icon: 'folderPlus', create: input.value.trim() });
+      build();
       active = Math.min(active, Math.max(rows.length - 1, 0));
-      list.innerHTML = rows.length ? rows.map((row, index) => `<button type="button" role="option" class="pick-row" data-pick="${index}" aria-selected="${index === active}" tabindex="-1">${uiIcon(row.icon)}<span class="pick-text"><span>${escapeHtml(row.label)}</span>${row.detail ? `<small>${escapeHtml(row.detail)}</small>` : ''}</span></button>`).join('') : `<p class="pick-empty">${escapeHtml(text.noFoldersFound)}</p>`;
-      list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+      const query = input.value.trim();
+      list.innerHTML = rows.length ? rows.map((item, index) => item.kind === 'create'
+        ? pickerCreateHtml(`move-opt-${index}`, fill(text.createNamed, { v: item.name }), index === active)
+        : pickerRowHtml(item.row, { id: `move-opt-${index}`, active: index === active, current: false, query, copy: text })).join('') : `<p class="pick-empty">${escapeHtml(text.noFoldersFound)}</p>`;
+      const row = list.querySelector<HTMLElement>('[data-active="true"]');
+      if (row) { input.setAttribute('aria-activedescendant', row.id); row.scrollIntoView({ block: 'nearest' }); }
+      else input.removeAttribute('aria-activedescendant');
+    };
+    const toggle = (value: string, open: boolean) => {
+      if (open === expanded.has(value)) return;
+      if (open) expanded.add(value); else expanded.delete(value);
+      store.save(expanded);
+      paint();
     };
     const finish = (value: string | undefined) => {
       dialog.close();
       input.removeEventListener('input', onInput);
       input.removeEventListener('keydown', onKey);
       list.removeEventListener('click', onClick);
+      list.removeEventListener('mousedown', onMouseDown);
       dialog.removeEventListener('cancel', onCancel);
       dialog.removeEventListener('click', onBackdrop);
       resolve(value);
     };
-    const choose = async (row: PickRow | undefined) => {
-      if (!row) return;
-      if (row.create === undefined) { finish(row.value); return; }
-      const response = await sendRuntime(port, 'collection-create', { name: row.create });
-      finish(response?.item?.id);
+    const choose = async (item: MoveRow | undefined) => {
+      if (!item) return;
+      if (item.kind === 'folder') { finish(item.row.value); return; }
+      const response = await sendRuntime(port, 'collection-create', { name: item.name });
+      if (!response?.item?.id) { say(text.notSaved); return; }
+      finish(response.item.id);
     };
-    const onInput = () => { active = 0; paint(); };
+    const onInput = () => {
+      build();
+      const hit = rows.findIndex((item) => item.kind === 'create' || item.row.match);
+      active = hit >= 0 ? hit : 0;
+      list.scrollTop = 0;
+      paint();
+    };
     const onKey = (event: KeyboardEvent) => {
       if (event.isComposing) return;
+      const item = rows[active];
+      const browsing = !input.value;
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault();
         if (rows.length) active = (active + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
         paint();
-      }
-      if (event.key === 'Enter') { event.preventDefault(); void choose(rows[active]); }
+      } else if (browsing && event.key === 'ArrowRight' && item?.kind === 'folder' && item.row.hasChildren) {
+        event.preventDefault();
+        if (!item.row.expanded) toggle(item.row.value, true);
+        else { active += 1; paint(); }
+      } else if (browsing && event.key === 'ArrowLeft' && item?.kind === 'folder') {
+        event.preventDefault();
+        if (item.row.hasChildren && item.row.expanded) toggle(item.row.value, false);
+        else if (item.row.parent) { active = Math.max(0, indexOf(item.row.parent)); paint(); }
+      } else if (event.key === 'Enter') { event.preventDefault(); void choose(item); }
     };
+    const onMouseDown = (event: Event) => event.preventDefault();
     const onClick = (event: Event) => {
-      const index = (event.target as HTMLElement).closest<HTMLElement>('[data-pick]')?.dataset.pick;
-      if (index !== undefined) void choose(rows[Number(index)]);
+      const target = event.target as HTMLElement;
+      const twisty = target.closest<HTMLElement>('[data-toggle]');
+      if (twisty) {
+        const value = twisty.dataset.toggle ?? '';
+        active = Math.max(0, indexOf(value));
+        toggle(value, !expanded.has(value));
+        return;
+      }
+      const row = target.closest<HTMLElement>('.tree-row');
+      if (!row) return;
+      const index = Number(row.id.replace('move-opt-', ''));
+      void choose(rows[index]);
     };
     const onCancel = () => finish(undefined);
     const onBackdrop = (event: Event) => { if (event.target === dialog) finish(undefined); };
@@ -1422,8 +1484,11 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     input.addEventListener('input', onInput);
     input.addEventListener('keydown', onKey);
     list.addEventListener('click', onClick);
+    list.addEventListener('mousedown', onMouseDown);
     dialog.addEventListener('cancel', onCancel);
     dialog.addEventListener('click', onBackdrop);
+    build();
+    active = Math.max(0, indexOf(here));
     paint();
     dialog.showModal();
     input.focus();

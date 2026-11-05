@@ -606,10 +606,29 @@ a.bookmark-title:hover { color: var(--accent-text); text-decoration: none; }
 .folder-popover:popover-open { display: flex; flex-direction: column; }
 .folder-popover .list-search { flex: none; }
 .folder-popover .pick-list { position: relative; overflow-y: auto; overscroll-behavior: contain; }
-.folder-popover .pick-row { min-height: 2.125rem; }
-.folder-popover .pick-check { display: inline-grid; color: var(--accent-text); }
+.folder-popover[aria-busy="true"] .pick-list { opacity: 0.6; pointer-events: none; }
+/* 树形行：缩进按层级，左侧小箭头折叠；活动行（键盘/悬停）与当前选中分开表达。 */
+.folder-tree-list { gap: 1px; }
+.tree-row { position: relative; gap: 0.375rem; min-height: 2.125rem; padding: 0.2rem 0.5rem 0.2rem calc(0.25rem + var(--depth, 0) * 1.125rem); cursor: pointer; user-select: none; color: var(--text); font-weight: 500; }
+.tree-row[aria-selected="true"] { background: transparent; color: var(--text); }
+.tree-row:hover { background: var(--hover); }
+.tree-row[data-active="true"] { background: var(--accent-soft); color: var(--accent-text); }
+.tree-row[data-active="true"] > .ui-icon { color: inherit; }
+.tree-row.is-current { color: var(--accent-text); font-weight: 620; }
+.tree-row.is-current > .ui-icon { color: var(--accent-text); }
+.tree-row.is-context { color: var(--muted); }
+.tree-row mark { padding: 0; border-radius: 2px; color: inherit; font-weight: 680; background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.tree-row.is-create { color: var(--accent-text); }
+.tree-row.is-create > .ui-icon { color: inherit; }
+.tree-row > .ui-icon { flex: none; width: 1rem; height: 1rem; }
+.pick-twisty { flex: none; display: inline-grid; place-items: center; width: 1.375rem; height: 1.375rem; border-radius: 0.375rem; color: var(--muted); }
+.pick-twisty[data-toggle]:hover { background: var(--press); color: var(--text); }
+.pick-twisty .ui-icon { width: 0.875rem; height: 0.875rem; }
+.tree-row[aria-expanded="true"] > .pick-twisty .ui-icon { transform: rotate(90deg); }
+/* 层级引导线：子级行左侧一条细线，帮助在长列表中对齐父级。 */
+.tree-row[aria-level]:not([aria-level="1"])::before { content: ""; position: absolute; top: 0; bottom: 0; left: calc(0.25rem + (var(--depth, 0) - 1) * 1.125rem + 0.6875rem); border-left: 1px solid var(--border); pointer-events: none; }
+.folder-popover .pick-check { display: inline-grid; margin-left: auto; color: var(--accent-text); }
 .folder-popover .pick-check .ui-icon { width: 0.95rem; height: 0.95rem; }
-.folder-popover .pick-row.is-current { font-weight: 620; }
 .folder-popover .pick-empty { margin: 0; }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-3); }
 #decision { display: none; }
