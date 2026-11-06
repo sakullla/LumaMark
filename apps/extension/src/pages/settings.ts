@@ -4,6 +4,7 @@ import { classifyFailure } from '../ui/bar';
 import { copyFor, detectUiLanguage, fill, probeSentence, relativeTime, type UiLanguage } from '../ui/copy';
 import { readPreferences, savePreference, type AccentChoice, type ThemeChoice } from '../ui/theme';
 import { bindFolderPicker } from '../ui/folder-picker';
+import { uiIcon } from '../ui/icons';
 import { chooseTextFile } from './files';
 import { sendRuntime, type RuntimePort } from './popup';
 
@@ -44,6 +45,17 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   const importAction = root.querySelector<HTMLSelectElement>('#import-action');
   const passwordInput = root.querySelector<HTMLInputElement>('#webdav-password');
   const autoSync = root.querySelector<HTMLInputElement>('#auto-sync');
+  const passwordToggle = root.querySelector<HTMLButtonElement>('#toggle-password');
+  const showPassword = (reveal: boolean) => {
+    if (!passwordInput || !passwordToggle) return;
+    passwordInput.type = reveal ? 'text' : 'password';
+    const label = reveal ? text.hidePassword : text.showPassword;
+    passwordToggle.title = label;
+    passwordToggle.setAttribute('aria-label', label);
+    passwordToggle.setAttribute('aria-pressed', String(reveal));
+    passwordToggle.innerHTML = uiIcon(reveal ? 'eyeOff' : 'eye');
+  };
+  passwordToggle?.addEventListener('click', () => showPassword(passwordInput?.type === 'password'));
   const setSync = (value: string) => { if (syncStatus) syncStatus.textContent = value; };
   const statusText = (status: SettingsStatus, detail = '') => settingsStatusMessage(status, detail, language);
   let configured = false;
@@ -251,6 +263,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
         autoSync: true,
       });
       if (passwordInput) passwordInput.value = '';
+      showPassword(false);
       if (autoSync) autoSync.checked = Boolean(response?.autoSync);
       const kind = String(response?.probe ?? '');
       if (!response?.ok) setSync(statusText('error'));
@@ -261,6 +274,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
       await loadConflicts();
     } catch {
       if (passwordInput) passwordInput.value = '';
+      showPassword(false);
       setSync(statusText('error'));
     }
   });

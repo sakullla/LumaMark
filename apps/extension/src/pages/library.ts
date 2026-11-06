@@ -214,7 +214,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
 
   type Decision = 'confirm' | 'alt' | 'cancel';
   /** The one yes/no question of the page. `alt` adds a second way to say yes. */
-  const decide = (message: string, options: { confirm?: string; title?: string; alt?: string } = {}) => new Promise<Decision>((resolve) => {
+  const decide = (message: string, options: { confirm?: string; title?: string; alt?: string; altTone?: 'primary' | 'danger' } = {}) => new Promise<Decision>((resolve) => {
     const dialog = get<HTMLDialogElement>('#decision');
     const heading = get('#decision-heading');
     const label = get('#decision-text');
@@ -225,7 +225,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (heading) heading.textContent = options.title ?? text.confirmTitle;
     if (label) label.textContent = message;
     yes.textContent = options.confirm ?? text.delete;
-    if (alt) { alt.hidden = !options.alt; alt.textContent = options.alt ?? ''; }
+    if (alt) { alt.hidden = !options.alt; alt.textContent = options.alt ?? ''; alt.className = options.altTone ?? 'danger'; }
     dialog.classList.toggle('has-choice', Boolean(options.alt));
     const finish = (value: Decision) => {
       dialog.close();
@@ -271,6 +271,19 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     dialog.showModal();
     input.select();
   });
+
+  // ── Narrow screens: the sidebar slides in over the list ──
+  const sideOpen = () => Boolean(get('.library-shell')?.classList.contains('is-side-open'));
+  const setSideOpen = (open: boolean) => {
+    const shell = get('.library-shell');
+    if (!shell || shell.classList.contains('is-side-open') === open) return;
+    shell.classList.toggle('is-side-open', open);
+    get('#side-toggle')?.setAttribute('aria-expanded', String(open));
+    if (open) (get<HTMLElement>('.library-side [aria-pressed="true"]') ?? get<HTMLElement>('#scope-nav .tree-button'))?.focus();
+  };
+  get('#side-toggle')?.addEventListener('click', () => setSideOpen(!sideOpen()));
+  get('#side-scrim')?.addEventListener('click', () => setSideOpen(false));
+  if (typeof matchMedia === 'function') matchMedia('(max-width: 860px)').addEventListener?.('change', (event) => { if (!event.matches) setSideOpen(false); });
 
   // ── Selection ──
   const syncSelection = () => {
@@ -496,9 +509,15 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (subfolders) {
       const current: LibraryScope = scope;
       const id = current.kind === 'folder' ? current.id : undefined;
-      const children = id && !filters.text.trim() ? collections.filter((item) => item.parentId === id && !item.deletedAt) : [];
+      // Same order as the sidebar tree, so the two never disagree.
+      const find = (nodes: FolderNode[]): FolderNode | undefined => {
+        for (const node of nodes) { const hit = node.id === id ? node : find(node.children); if (hit) return hit; }
+        return undefined;
+      };
+      const children = id && !filters.text.trim() ? find(folderTree(collections))?.children ?? [] : [];
+      const counts = folderCounts(bookmarks);
       subfolders.hidden = !children.length;
-      subfolders.innerHTML = children.map((child) => `<button type="button" class="subfolder" data-select-folder="${escapeHtml(child.id)}" data-drop="folder:${escapeHtml(child.id)}">${uiIcon('folder')}<span>${escapeHtml(child.name)}</span></button>`).join('');
+      subfolders.innerHTML = children.map((child) => `<button type="button" class="subfolder" data-select-folder="${escapeHtml(child.id)}" data-drop="folder:${escapeHtml(child.id)}">${uiIcon('folder')}<span>${escapeHtml(child.name)}</span>${counts[child.id] ? `<span class="subfolder-count">${counts[child.id]}</span>` : ''}</button>`).join('');
     }
 
     const searchScope = get('#search-scope');
@@ -560,8 +579,9 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
       selection.clear();
       anchorId = undefined;
       cursorId = undefined;
-      if (editingId) closeEditor();
+      leaveEditor();
     }
+    setSideOpen(false);
     render();
     const main = scroller();
     if (main) main.scrollTop = 0;
@@ -643,6 +663,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
   const closeEditor = () => {
     const editor = get('#editor');
     if (editor) editor.hidden = true;
+    get('.library-shell')?.classList.remove('is-editing');
     editingId = undefined;
     editorBaseline = '';
     markRows();
@@ -654,6 +675,7 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (!bookmark || !editor || bookmark.deletedAt) return;
     editingId = id;
     editor.hidden = false;
+    get('.library-shell')?.classList.add('is-editing');
     editorField<HTMLInputElement>('title')!.value = bookmark.title;
     editorField<HTMLInputElement>('url')!.value = bookmark.url;
     editorField<HTMLInputElement>('tags')!.value = bookmark.tags.join(', ');
@@ -715,14 +737,48 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     openEditor(id);
   };
 
+  const editorDirty = () => Boolean(editingId) && editorSnapshot() !== editorBaseline;
+
+  /** Close by hand (Esc, ×, Cancel): unsaved typing asks first instead of vanishing. */
+  const requestCloseEditor = async () => {
+    if (!editorDirty()) { closeEditor(); return; }
+    const choice = await decide(text.unsavedText, { title: text.unsavedTitle, confirm: text.discardChanges, alt: text.saveAndClose, altTone: 'primary' });
+    if (choice === 'cancel') { get<HTMLInputElement>('#editor-title')?.focus(); return; }
+    if (choice === 'alt' && !await saveEditor()) return;
+    closeEditor();
+    if (choice === 'alt') await load();
+  };
+
+  /** Leaving for another view keeps what was typed, like switching bookmarks does. */
+  const leaveEditor = () => {
+    if (!editingId) return;
+    if (editorDirty()) {
+      const title = editorField<HTMLInputElement>('title')?.value.trim() || editorField<HTMLInputElement>('url')?.value || '';
+      void saveEditor().then((ok) => {
+        say(ok ? fill(text.editsSaved, { v: title }) : text.notSaved);
+        return load();
+      });
+    }
+    closeEditor();
+  };
+
+  get<HTMLFormElement>('#editor')?.addEventListener('keydown', (event) => {
+    const key = event as KeyboardEvent;
+    if (key.isComposing || !(key.ctrlKey || key.metaKey)) return;
+    if (key.key === 'Enter' || key.key.toLowerCase() === 's') {
+      key.preventDefault();
+      get<HTMLFormElement>('#editor')?.requestSubmit();
+    }
+  });
+
   get<HTMLFormElement>('#editor')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!await saveEditor()) return;
     closeEditor();
     await load();
   });
-  get('#editor-cancel')?.addEventListener('click', closeEditor);
-  get('#editor-close')?.addEventListener('click', closeEditor);
+  get('#editor-cancel')?.addEventListener('click', () => { void requestCloseEditor(); });
+  get('#editor-close')?.addEventListener('click', () => { void requestCloseEditor(); });
   get('#editor-copy')?.addEventListener('click', async () => {
     const url = editorField<HTMLInputElement>('url')?.value ?? '';
     if (!url) return;
@@ -1073,7 +1129,13 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
     if (key.key === 'Escape') {
       const openMenu = get('details.menu[open]');
       if (openMenu) { closeMenus(); return; }
-      if (editingId) { closeEditor(); return; }
+      if (sideOpen()) { setSideOpen(false); get('#side-toggle')?.focus(); return; }
+      if (editingId) {
+        // Open the question after this key: the same Esc would otherwise cancel it at once.
+        key.preventDefault();
+        setTimeout(() => { void requestCloseEditor(); }, 0);
+        return;
+      }
       const search = get<HTMLInputElement>('#search');
       if (search && target === search && search.value) {
         search.value = '';
@@ -1719,13 +1781,14 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
       { scope: { kind: 'trash' } as LibraryScope, label: text.trash },
     ],
   });
+  const SCOPE_ICONS: Partial<Record<LibraryScope['kind'], UiIconName>> = { all: 'layers', favorites: 'star', recent: 'clock', unfiled: 'inbox', duplicates: 'copy', trash: 'trash' };
   const groupOf = (hit: PaletteHit) => ({ scope: text.groupGo, folder: text.groupFolders, tag: text.groupTags, bookmark: text.groupBookmarks, command: text.groupCommands })[hit.kind];
   const paletteRow = (hit: PaletteHit, index: number) => {
     const option = (icon: string, label: string, detail = '') => `<button type="button" role="option" class="pick-row" id="palette-${index}" data-hit="${index}" aria-selected="${index === paletteActive}" tabindex="-1">${icon}<span class="pick-text"><span>${escapeHtml(label)}</span>${detail ? `<small>${escapeHtml(detail)}</small>` : ''}</span></button>`;
     if (hit.kind === 'bookmark') return option(siteIcon(hit.bookmark.url, hit.bookmark.title, hit.bookmark.domain, hit.bookmark.faviconUrl), hit.bookmark.title, hit.bookmark.domain);
     if (hit.kind === 'folder') return option(uiIcon('folder'), hit.label, hit.detail);
     if (hit.kind === 'tag') return option(uiIcon('tag'), `#${hit.label}`, bookmarkCountLabel(hit.count, language));
-    if (hit.kind === 'scope') return option(uiIcon('layers'), hit.label);
+    if (hit.kind === 'scope') return option(uiIcon(SCOPE_ICONS[hit.scope.kind] ?? 'layers'), hit.label);
     return option(uiIcon(paletteCommands.find((item) => item.id === hit.id)?.icon ?? 'command'), hit.label);
   };
   const paintPalette = () => {

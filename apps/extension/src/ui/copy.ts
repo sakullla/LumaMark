@@ -383,6 +383,16 @@ const en = {
   importHtmlHelp: 'Bring in bookmarks exported from any browser.',
   importJsonHelp: 'Restore a backup made by LumaMark.',
   exportHelp: 'Save everything to one JSON file.',
+  unsavedTitle: 'Discard changes?',
+  unsavedText: 'This bookmark has edits that have not been saved.',
+  discardChanges: 'Discard',
+  saveAndClose: 'Save',
+  editorSaveHint: 'to save',
+  showSidebar: 'Show folders and tags',
+  shortcutSaveEdit: 'Save the bookmark being edited',
+  editsSaved: 'Changes to “{v}” saved.',
+  showPassword: 'Show password',
+  hidePassword: 'Hide password',
 };
 
 const zh: { [K in keyof typeof en]: string } = {
@@ -768,6 +778,16 @@ const zh: { [K in keyof typeof en]: string } = {
   importHtmlHelp: '导入任何浏览器导出的书签文件。',
   importJsonHelp: '恢复 LumaMark 导出的备份。',
   exportHelp: '把全部内容存成一个 JSON 文件。',
+  unsavedTitle: '放弃修改？',
+  unsavedText: '这个书签还有没保存的修改。',
+  discardChanges: '放弃',
+  saveAndClose: '保存',
+  editorSaveHint: '保存',
+  showSidebar: '显示文件夹和标签',
+  shortcutSaveEdit: '保存正在编辑的书签',
+  editsSaved: '已保存对“{v}”的修改。',
+  showPassword: '显示密码',
+  hidePassword: '隐藏密码',
 };
 
 export type Copy = { [K in keyof typeof en]: string };
