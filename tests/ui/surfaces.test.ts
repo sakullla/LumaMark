@@ -140,8 +140,17 @@ describe('bookmark bar and shared surfaces', () => {
     expect(settings).toContain('type="password"');
     expect(settings).not.toContain('value="secret"');
     expect(settingsZh).toContain('用来让其他桌面浏览器得到同一套书签');
-    for (const html of [home, homeZh, settings, settingsZh, library, popupDocument('zh')]) {
+    for (const html of [home, homeZh, library, popupDocument('zh')]) {
       expect(html).not.toMatch(/全文|团队协作|社交分享|移动 Safari|注册|登录|配对|full-text archive|team collaboration|social sharing|Mobile Safari|pairing code|sign in/i);
+    }
+    for (const html of [settings, settingsZh]) {
+      expect(html).not.toMatch(/注册|创建账号|signup|sign-up|create account/i);
+      expect(html).toContain('id="account-login"');
+      expect(html).toContain('id="account-overwrite"');
+      expect(html).toContain('id="account-merge"');
+      expect(html).toContain('id="account-logout"');
+      expect(html).toContain('id="account-switch"');
+      expect(html).not.toContain('account-register');
     }
     expect(renderEmptyState({ ...defaultLibraryFilters(), text: 'missing' })).toContain('clear-filters');
     expect(renderEmptyState({ ...defaultLibraryFilters(), text: 'missing' })).toContain('class="empty-icon"');
@@ -159,11 +168,11 @@ describe('bookmark bar and shared surfaces', () => {
     expect(conflicts).not.toContain('https://same.example');
     expect(conflicts).toContain('data-resolution="local"');
     expect(conflicts).toContain('data-resolution="remote"');
+    expect(conflicts).toContain('data-resolution="merged"');
     expect(conflicts).toContain('data-batch-resolution="local"');
     expect(conflicts).toContain('data-batch-resolution="remote"');
     expect(conflicts).toContain('data-conflict-select-all');
     expect(conflicts).toContain('data-select-conflict="c"');
-    expect(conflicts).not.toContain('data-resolution="merged"');
     expect(renderConflicts([{ id: 'same', local: { title: 'Same', url: 'https://same.example', notes: '' }, remote: { title: 'Same', url: 'https://same.example', notes: '' } }])).toBe('');
     expect(settings).toContain('id="conflict-dialog"');
     expect(settings).toContain('id="conflict-bar"');

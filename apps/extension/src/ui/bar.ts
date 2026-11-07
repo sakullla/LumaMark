@@ -152,10 +152,10 @@ export function classifyFailure(message: string | undefined): ProbeKind | 'other
 
 export type HomeSyncPhrase = 'local-only' | 'aligned' | 'waiting-network' | 'needs-attention';
 
-export function homeSyncPhrase(input: { configured: boolean; status?: string; error?: string }): HomeSyncPhrase {
+export function homeSyncPhrase(input: { configured: boolean; status?: string; error?: string; pendingChanges?: number }): HomeSyncPhrase {
   if (!input.configured) return 'local-only';
   if (input.status === 'offline' || classifyFailure(input.error) === 'unreachable') return 'waiting-network';
-  if (input.status === 'error' || input.status === 'conflict') return 'needs-attention';
+  if (input.status === 'error' || input.status === 'conflict' || input.status === 'syncing' || (input.pendingChanges ?? 0) > 0) return 'needs-attention';
   return 'aligned';
 }
 

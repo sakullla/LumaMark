@@ -704,9 +704,10 @@ export function mountHome(root: PageRoot = document, port: RuntimePort = globalR
     if (typeof engine?.url === 'string') searchUrl = engine.url;
     model = buildBar(bookmarks, collections);
     const phrase = homeSyncPhrase({
-      configured: Boolean(config?.config?.configured),
+      configured: Boolean(config?.config?.configured) || Boolean(config?.account?.loggedIn),
       status: metadata?.metadata?.status,
       error: metadata?.metadata?.error,
+      pendingChanges: metadata?.metadata?.pendingChanges,
     });
     const syncLine = root.querySelector<HTMLElement>('#sync-line');
     if (syncLine) syncLine.innerHTML = renderSyncLine(phrase, language);

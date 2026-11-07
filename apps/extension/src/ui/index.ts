@@ -317,7 +317,8 @@ export function renderConflicts(
     const itemTitle = item.local?.title || item.remote?.title || item.local?.url || item.remote?.url || '';
     return `<article class="conflict-item${selected ? ' is-selected' : ''}" data-conflict-id="${escapeHtml(item.id)}">` +
       `<div class="conflict-item-head"><label class="check-line conflict-select"><input type="checkbox" data-select-conflict="${escapeHtml(item.id)}"${selected ? ' checked' : ''} aria-label="${escapeHtml(text.select)} ${escapeHtml(itemTitle)}"><span>${escapeHtml(itemTitle)}</span></label>${diffChips ? `<div class="chip-row">${diffChips}</div>` : ''}</div>` +
-      `<div class="conflict-sides">${side(text.localVersion, item.local, 'local', text.keepThis)}${side(text.otherVersion, item.remote, 'remote', text.keepOther)}</div></article>`;
+      `<div class="conflict-sides">${side(text.localVersion, item.local, 'local', text.keepThis)}${side(text.otherVersion, item.remote, 'remote', text.keepOther)}</div>` +
+      `<button type="button" class="secondary" data-resolution="merged">${escapeHtml(text.keepMix)}</button></article>`;
   }).join('') + `</div>`;
 }
 
@@ -330,7 +331,7 @@ export function renderSyncLine(phrase: HomeSyncPhrase, language: UiLanguage = 'e
   return `${status} <a href="settings.html">${escapeHtml(text.openSettings)}</a>`;
 }
 
-export type RuntimeAction = 'clean-duplicates' | 'purge-trash' | 'native-status' | 'set-native-sync' | 'save' | 'undo' | 'open-library' | 'open-home' | 'open-settings' | 'open-existing' | 'capture' | 'list' | 'list-collections' | 'update-existing' | 'copy-existing' | 'update' | 'delete' | 'restore' | 'favorite' | 'sync' | 'sync-configure' | 'export' | 'import' | 'list-conflicts' | 'resolve-conflict' | 'collection-create' | 'collection-update' | 'collection-delete' | 'collection-restore' | 'add' | 'sync-status' | 'reorder' | 'set-toolbar' | 'get-search-engine' | 'set-search-engine' | 'get-sync-config' | 'set-auto-sync';
+export type RuntimeAction = 'clean-duplicates' | 'purge-trash' | 'native-status' | 'set-native-sync' | 'save' | 'undo' | 'open-library' | 'open-home' | 'open-settings' | 'open-existing' | 'capture' | 'list' | 'list-collections' | 'update-existing' | 'copy-existing' | 'update' | 'delete' | 'restore' | 'favorite' | 'sync' | 'sync-configure' | 'export' | 'import' | 'list-conflicts' | 'resolve-conflict' | 'collection-create' | 'collection-update' | 'collection-delete' | 'collection-restore' | 'add' | 'sync-status' | 'reorder' | 'set-toolbar' | 'get-search-engine' | 'set-search-engine' | 'get-sync-config' | 'set-auto-sync' | 'account-status' | 'account-login' | 'account-choose' | 'account-logout' | 'account-switch';
 
 export interface RuntimeMessage { type: `lumamark-${RuntimeAction}`; payload?: unknown }
 
@@ -478,10 +479,29 @@ export function settingsDocument(language: UiLanguage = 'en'): string {
   const accentNames: Record<AccentChoice, string> = { iris: text.accentIris, ember: text.accentEmber, rose: text.accentRose, ocean: text.accentOcean, jade: text.accentJade, graphite: text.accentGraphite };
   const swatches = ACCENTS.map((accent) => `<label class="swatch" data-swatch="${accent}" title="${escapeHtml(accentNames[accent])}"><input type="radio" name="accent" value="${accent}" aria-label="${escapeHtml(accentNames[accent])}"><span aria-hidden="true"></span></label>`).join('');
   return pageShell(language, `${text.settingsTitle} · LumaMark`, `<main class="settings-shell"><aside class="library-side settings-side">${appHeader(language, 'settings')}` +
-    `<nav class="section-nav" aria-label="${escapeHtml(text.settingsSections)}">${section('native-section', text.nativeGroup, 'bookmark')}${section('sync-section', text.syncGroup, 'cloud')}${section('home-section', text.homeGroup, 'home')}${section('appearance-section', text.appearance, 'palette')}${section('data-section', text.dataGroup, 'file')}</nav></aside>` +
+    `<nav class="section-nav" aria-label="${escapeHtml(text.settingsSections)}">${section('native-section', text.nativeGroup, 'bookmark')}${section('account-section', text.accountGroup, 'layers')}${section('sync-section', text.syncGroup, 'cloud')}${section('home-section', text.homeGroup, 'home')}${section('appearance-section', text.appearance, 'palette')}${section('data-section', text.dataGroup, 'file')}</nav></aside>` +
     `<div class="settings-scroll"><div class="settings-main"><header class="settings-intro"><h1 class="settings-title">${escapeHtml(text.settingsTitle)}</h1><p class="settings-lead">${escapeHtml(text.settingsLead)}</p></header>` +
     `<section id="native-section" class="settings-card" aria-labelledby="native-heading">${cardHead('native-heading', text.nativeGroup, text.nativeExplain, 'bookmark')}` +
     `<label class="check-line switch-line" for="native-sync"><input id="native-sync" type="checkbox" role="switch"> <span>${escapeHtml(text.nativeToggle)}</span></label><p id="native-status" role="status" aria-live="polite"></p></section>` +
+    `<section id="account-section" class="settings-card" aria-labelledby="account-heading">${cardHead('account-heading', text.accountGroup, text.accountExplain, 'layers')}` +
+    `<form id="account-form" class="form-grid">` +
+    `<label for="account-server">${escapeHtml(text.accountServer)}</label><input id="account-server" name="account-server" type="url" autocomplete="url" placeholder="https://bookmarks.example">` +
+    `<label for="account-user">${escapeHtml(text.username)}</label><input id="account-user" name="account-user" type="text" autocomplete="username">` +
+    `<label for="account-password">${escapeHtml(text.password)}</label><input id="account-password" name="account-password" type="password" autocomplete="current-password">` +
+    `<div class="button-row"><button type="submit" id="account-login" class="primary">${escapeHtml(text.accountSignIn)}</button></div></form>` +
+    `<div id="account-signed-in" hidden><p id="account-who"></p>` +
+    `<div class="button-row"><button type="button" id="account-logout" class="secondary">${escapeHtml(text.accountSignOut)}</button></div>` +
+    `<form id="account-switch-form" class="form-grid">` +
+    `<label for="account-switch-user">${escapeHtml(text.accountSwitch)}</label><input id="account-switch-user" name="account-switch-user" type="text" autocomplete="username">` +
+    `<label for="account-switch-password">${escapeHtml(text.password)}</label><input id="account-switch-password" name="account-switch-password" type="password" autocomplete="current-password">` +
+    `<div class="button-row"><button type="submit" id="account-switch" class="secondary">${escapeHtml(text.accountSwitchSubmit)}</button></div></form></div>` +
+    `<p id="account-status" role="status" aria-live="polite"></p>` +
+    `<dialog id="account-choice" class="dialog" aria-labelledby="account-choice-title">` +
+    `<div class="dialog-head"><h2 id="account-choice-title" class="dialog-title">${escapeHtml(text.accountChoiceTitle)}</h2>` +
+    `<button type="button" id="account-choice-close" class="icon-button" title="${escapeHtml(text.close)}" aria-label="${escapeHtml(text.close)}">${uiIcon('x')}</button></div>` +
+    `<p id="account-choice-text">${escapeHtml(text.accountChoiceText)}</p>` +
+    `<div class="button-row"><button type="button" id="account-overwrite" class="primary">${escapeHtml(text.accountOverwrite)}</button>` +
+    `<button type="button" id="account-merge" class="secondary">${escapeHtml(text.accountMerge)}</button></div></dialog></section>` +
     `<section id="sync-section" class="settings-card" aria-labelledby="sync-heading">${cardHead('sync-heading', text.syncGroup, text.syncExplain, 'cloud')}` +
     `<div class="status-row"><div id="sync-summary" class="status-strip" data-state="idle"><span class="sync-dot" aria-hidden="true"></span><span id="sync-summary-text">${escapeHtml(text.syncNotSetUp)}</span></div><button type="button" id="sync-now" class="secondary">${uiIcon('sync')}<span>${escapeHtml(text.syncNow)}</span></button></div>` +
     `<p id="sync-metadata"></p>` +

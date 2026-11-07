@@ -603,7 +603,12 @@ export function mountLibrary(root: PageRoot = document, port: RuntimePort = glob
       paths = folderPaths(collections);
       groups = duplicateGroups(bookmarks);
       const line = get('#sync-line');
-      if (line) line.innerHTML = renderSyncLine(homeSyncPhrase({ configured: Boolean(config?.config?.configured), status: metadata?.metadata?.status, error: metadata?.metadata?.error }), language);
+      if (line) line.innerHTML = renderSyncLine(homeSyncPhrase({
+        configured: Boolean(config?.config?.configured) || Boolean(config?.account?.loggedIn),
+        status: metadata?.metadata?.status,
+        error: metadata?.metadata?.error,
+        pendingChanges: metadata?.metadata?.pendingChanges,
+      }), language);
       const current: LibraryScope = scope;
       if (current.kind === 'folder' && !aliveFolderIds(collections).has(current.id)) scope = { kind: 'all' };
       const first = !loaded;

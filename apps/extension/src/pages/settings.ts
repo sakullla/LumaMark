@@ -120,6 +120,109 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   const loadNative = async () => {
     try { showNative(await sendRuntime(port, 'native-status')); } catch { showNative(undefined); }
   };
+  const accountStatus = root.querySelector<HTMLElement>('#account-status');
+  const accountForm = root.querySelector<HTMLElement>('#account-form');
+  const accountSignedIn = root.querySelector<HTMLElement>('#account-signed-in');
+  const accountWho = root.querySelector<HTMLElement>('#account-who');
+  const accountChoice = root.querySelector<HTMLDialogElement>('#account-choice');
+  let accountLoggedIn = false;
+  const paintAccount = (account?: { loggedIn?: boolean; username?: string }) => {
+    accountLoggedIn = Boolean(account?.loggedIn);
+    if (accountForm) accountForm.hidden = accountLoggedIn;
+    if (accountSignedIn) accountSignedIn.hidden = !accountLoggedIn;
+    if (accountWho) accountWho.textContent = accountLoggedIn ? fill(text.accountSignedIn, { name: account?.username ?? '' }) : '';
+  };
+  const openAccountChoice = () => {
+    if (!accountChoice) return;
+    if (typeof accountChoice.showModal === 'function') {
+      if (!accountChoice.open) accountChoice.showModal();
+    } else accountChoice.setAttribute('open', '');
+  };
+  const closeAccountChoice = () => {
+    if (!accountChoice) return;
+    if (typeof accountChoice.close === 'function' && accountChoice.open) accountChoice.close();
+    accountChoice.removeAttribute('open');
+  };
+  const loadAccount = async () => {
+    try {
+      const response = await sendRuntime(port, 'account-status');
+      paintAccount(response);
+    } catch { paintAccount(undefined); }
+  };
+  root.querySelector<HTMLFormElement>('#account-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget as HTMLFormElement);
+    if (accountStatus) accountStatus.textContent = '';
+    try {
+      const response = await sendRuntime(port, 'account-login', {
+        serverUrl: data.get('account-server'),
+        username: data.get('account-user'),
+        password: data.get('account-password'),
+      });
+      const passwordField = root.querySelector<HTMLInputElement>('#account-password');
+      if (passwordField) passwordField.value = '';
+      if (response?.status === 'choice') {
+        openAccountChoice();
+        return;
+      }
+      if (!response?.ok) {
+        if (accountStatus) accountStatus.textContent = text.accountFailed;
+        return;
+      }
+      await loadAccount();
+      await loadForm();
+    } catch {
+      if (accountStatus) accountStatus.textContent = text.accountFailed;
+    }
+  });
+  const chooseAccount = async (choice: 'overwrite' | 'merge' | 'cancel') => {
+    closeAccountChoice();
+    try {
+      const response = await sendRuntime(port, 'account-choose', { choice });
+      if (choice !== 'cancel' && !response?.ok && accountStatus) accountStatus.textContent = text.accountFailed;
+      await loadAccount();
+      await loadForm();
+    } catch {
+      if (accountStatus) accountStatus.textContent = text.accountFailed;
+    }
+  };
+  root.querySelector<HTMLButtonElement>('#account-overwrite')?.addEventListener('click', () => { void chooseAccount('overwrite'); });
+  root.querySelector<HTMLButtonElement>('#account-merge')?.addEventListener('click', () => { void chooseAccount('merge'); });
+  root.querySelector<HTMLButtonElement>('#account-choice-close')?.addEventListener('click', () => { void chooseAccount('cancel'); });
+  accountChoice?.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    void chooseAccount('cancel');
+  });
+  root.querySelector<HTMLButtonElement>('#account-logout')?.addEventListener('click', async () => {
+    try {
+      const response = await sendRuntime(port, 'account-logout');
+      if (!response?.ok && accountStatus) accountStatus.textContent = text.accountFailed;
+      await loadAccount();
+      await loadForm();
+    } catch {
+      if (accountStatus) accountStatus.textContent = text.accountFailed;
+    }
+  });
+  root.querySelector<HTMLFormElement>('#account-switch-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget as HTMLFormElement);
+    const server = root.querySelector<HTMLInputElement>('#account-server')?.value ?? '';
+    try {
+      const response = await sendRuntime(port, 'account-switch', {
+        serverUrl: server,
+        username: data.get('account-switch-user'),
+        password: data.get('account-switch-password'),
+      });
+      const passwordField = root.querySelector<HTMLInputElement>('#account-switch-password');
+      if (passwordField) passwordField.value = '';
+      if (!response?.ok && accountStatus) accountStatus.textContent = text.accountFailed;
+      await loadAccount();
+      await loadForm();
+    } catch {
+      if (accountStatus) accountStatus.textContent = text.accountFailed;
+    }
+  });
+
   nativeToggle?.addEventListener('change', async () => {
     nativeToggle.disabled = true;
     try {
@@ -133,11 +236,23 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
     if (!conflicts) return;
     conflicts.querySelectorAll<HTMLButtonElement>('[data-resolution]').forEach((button) => button.addEventListener('click', async () => {
       const card = button.closest<HTMLElement>('[data-conflict-id]');
-      if (!card || (button.dataset.resolution !== 'local' && button.dataset.resolution !== 'remote')) return;
+      const resolution = button.dataset.resolution;
+      if (!card || (resolution !== 'local' && resolution !== 'remote' && resolution !== 'merged')) return;
       const id = card.dataset.conflictId ?? '';
       if (!id) return;
       selectedConflicts.delete(id);
-      await sendRuntime(port, 'resolve-conflict', { id, resolution: button.dataset.resolution });
+      if (resolution === 'merged') {
+        const item = currentConflicts.find((entry) => entry.id === id);
+        if (!item?.local?.id) return;
+        const merged = { ...item.local } as Bookmark;
+        for (const field of conflictFields(item.local, item.remote)) {
+          if (field === 'title' || !item.remote) continue;
+          (merged as unknown as Record<string, unknown>)[field] = (item.remote as unknown as Record<string, unknown>)[field];
+        }
+        await sendRuntime(port, 'resolve-conflict', { id, resolution: 'merged', merged });
+      } else {
+        await sendRuntime(port, 'resolve-conflict', { id, resolution });
+      }
       await loadConflicts();
     }));
 
@@ -240,6 +355,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
         passwordInput.placeholder = config.url ? text.passwordKept : '';
       }
       if (autoSync) autoSync.checked = Boolean(config.autoSync);
+      configured = Boolean(config.url) || accountLoggedIn;
       paintSyncControls();
       if (search && typeof engineResponse?.url === 'string') search.value = engineResponse.url;
       const folders = root.querySelector<HTMLSelectElement>('#toolbar-folder');
@@ -390,7 +506,7 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   links.forEach((link) => link.addEventListener('click', () => { if (link.dataset.sectionLink) markSection(link.dataset.sectionLink); }));
 
   bindFolderPicker(root.querySelector<HTMLSelectElement>('#toolbar-folder'), text);
-  void loadForm().then(() => loadConflicts(true));
+  void loadAccount().then(() => loadForm()).then(() => loadConflicts(true));
   void loadNative();
 }
 

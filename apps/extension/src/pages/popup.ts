@@ -38,6 +38,8 @@ export function popupRuntimeMessage(action: RuntimeAction, payload?: unknown): R
     'get-sync-config': 'lumamark-get-sync-config', 'set-auto-sync': 'lumamark-set-auto-sync',
     'native-status': 'lumamark-native-status', 'set-native-sync': 'lumamark-set-native-sync',
     'collection-update': 'lumamark-collection-update', add: 'lumamark-add', 'open-settings': 'lumamark-open-settings',
+    'account-status': 'lumamark-account-status', 'account-login': 'lumamark-account-login', 'account-choose': 'lumamark-account-choose',
+    'account-logout': 'lumamark-account-logout', 'account-switch': 'lumamark-account-switch',
   };
   return { type: runtimeTypes[action], ...(payload === undefined ? {} : { payload }) };
 }

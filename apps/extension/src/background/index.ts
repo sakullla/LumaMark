@@ -34,6 +34,18 @@ import { deletedBookmarks, duplicateGroups, extraDuplicateIds, folderDescendants
 import { placeItem } from './place';
 import { normalizeBridgeState, reconcileNativeBookmarks, type BridgeState, type NativeBookmarksApi, type ReconcileReport } from './native';
 import { probeWebDav } from './probe';
+import {
+  ACCOUNT_SESSION_KEY,
+  AccountFlow,
+  accountManifestClient,
+  browserSkipsNativeBookmarks,
+  GUEST_DATABASE,
+  markUnsynced,
+  openAccountLibrary,
+  replaceBrowserBookmarks,
+  type AccountLibrary,
+  type AccountSession,
+} from './account';
 
 export function webDavClient(config: SyncConfig): WebDavClient {
   const endpoint = `${config.url.replace(/\/$/, '')}/${config.path.replace(/^\//, '')}`;
@@ -121,7 +133,7 @@ const AUTO_SYNC_PERIOD_MINUTES = 5;
 const STORE_WRITES = new Set<PropertyKey>(['put', 'remove', 'putCollection']);
 
 /** The store as the rest of the background sees it: every write is followed by a pass over the browser's bookmarks. */
-function notifyingRepository<T extends object>(store: T, onWrite: () => void): T {
+function notifyingRepository<T extends object>(store: T, onWrite: () => void | Promise<void>): T {
   return new Proxy(store, {
     get(target, property) {
       const value = Reflect.get(target, property, target);
@@ -129,16 +141,61 @@ function notifyingRepository<T extends object>(store: T, onWrite: () => void): T
       if (!STORE_WRITES.has(property)) return value.bind(target);
       return async (...args: unknown[]) => {
         const result = await value.apply(target, args);
-        onWrite();
+        await onWrite();
         return result;
       };
     },
   });
 }
 
-export function startBackground(api = resolveExtensionApi(), store = new IndexedDbRepository()): void {
-  let onStoreWrite = () => {};
-  const repository = notifyingRepository(store, () => onStoreWrite());
+function selectingRepository(select: () => IndexedDbRepository): IndexedDbRepository {
+  return new Proxy({} as IndexedDbRepository, {
+    get(_target, property) {
+      const current = select();
+      const value = Reflect.get(current, property, current);
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(current) : value;
+    },
+  });
+}
+
+export function startBackground(
+  api = resolveExtensionApi(),
+  store = new IndexedDbRepository(GUEST_DATABASE),
+  accountStore: AccountLibrary = openAccountLibrary(),
+): void {
+  let onStoreWrite: () => void | Promise<void> = () => {};
+  let nativeSuspended = 0;
+  let rewriteEnabledImpl: () => Promise<boolean> = async () => false;
+  let rewriteBarImpl: (which: 'guest' | 'account') => Promise<void> = async () => {};
+  const readBrowser = () => browserSkipsNativeBookmarks({
+    userAgent: typeof navigator === 'undefined' ? '' : navigator.userAgent,
+    extensionUrl: api.runtime?.getURL?.('background.js') ?? '',
+  });
+  const sessionStore = {
+    async load(): Promise<AccountSession | undefined> {
+      try {
+        const stored = await api.storage?.local.get(ACCOUNT_SESSION_KEY);
+        const value = stored?.[ACCOUNT_SESSION_KEY];
+        if (!value || typeof value !== 'object') return undefined;
+        const session = value as Partial<AccountSession>;
+        if (typeof session.serverUrl !== 'string' || typeof session.username !== 'string' || typeof session.token !== 'string') return undefined;
+        return { serverUrl: session.serverUrl, username: session.username, token: session.token };
+      } catch { return undefined; }
+    },
+    async save(session: AccountSession | undefined): Promise<void> {
+      if (!api.storage?.local) return;
+      await api.storage.local.set({ [ACCOUNT_SESSION_KEY]: session ?? null });
+    },
+  };
+  const flow = new AccountFlow({
+    guest: store,
+    account: accountStore,
+    fetch: (input, init) => globalThis.fetch(input, init),
+    rewriteEnabled: () => rewriteEnabledImpl(),
+    rewriteBar: (which) => rewriteBarImpl(which),
+    sessionStore,
+  });
+  const repository = notifyingRepository(selectingRepository(() => (flow.active === 'account' ? accountStore : store) as IndexedDbRepository), () => onStoreWrite());
   // The URL index returns one row. A tombstone can sort before a live bookmark with the same URL.
   const bookmarkForSave = async (url: string): Promise<Bookmark | undefined> => {
     let normalized = url;
@@ -336,7 +393,7 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
   };
 
   const loadSyncConfig = async () => {
-    syncConfig = await repository.getSyncConfig();
+    syncConfig = await store.getSyncConfig();
     return syncConfig;
   };
 
@@ -371,9 +428,11 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
   };
   /** Called while holding the shared data queue. */
   const reconcile = async (): Promise<ReconcileReport | undefined> => {
+    if (nativeSuspended || readBrowser()) return undefined;
     if (!nativeApi || !(await nativeEnabled())) return undefined;
     try {
-      const report = await reconcileNativeBookmarks(nativeApi, store, bridgeStore);
+      const activeStore = flow.active === 'account' ? accountStore : store;
+      const report = await reconcileNativeBookmarks(nativeApi, activeStore, bridgeStore);
       lastNative = { at: new Date().toISOString(), report, error: report.errors[0] };
       if (report.repoChanges) schedulePush();
       return report;
@@ -388,7 +447,37 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
     if (nativeTimer) clearTimeout(nativeTimer);
     nativeTimer = setTimeout(() => { nativeTimer = undefined; void reconcileNow(); }, delay);
   };
+  rewriteEnabledImpl = async () => {
+    if (readBrowser() || !nativeApi) return false;
+    return nativeEnabled();
+  };
+  rewriteBarImpl = async (which) => {
+    if (!nativeApi) return;
+    nativeSuspended += 1;
+    try {
+      await replaceBrowserBookmarks(nativeApi, which === 'account' ? accountStore : store, bridgeStore);
+    } finally {
+      nativeSuspended -= 1;
+    }
+  };
   const sync = async () => {
+    if (flow.active === 'account' && flow.session) {
+      const session = flow.session;
+      pushSuppressed += 1;
+      try {
+        await reconcile();
+        const engine = new WebDavSyncEngine(accountStore, accountManifestClient(session, (input, init) => globalThis.fetch(input, init)));
+        let result = await engine.sync();
+        const postReconcile = await reconcile();
+        if (result.status === 'idle' && postReconcile?.repoChanges) {
+          result = await engine.sync();
+          await reconcile();
+        }
+        return result;
+      } finally {
+        pushSuppressed -= 1;
+      }
+    }
     const config = syncConfig ?? await loadSyncConfig();
     if (!config?.url) return { ok: false, status: 'error' as const, error: 'WebDAV is not configured', retryable: false };
     // Adopting the remote snapshot writes the store. Those writes must not schedule another push.
@@ -420,6 +509,10 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
     pushTimer = setTimeout(() => {
       pushTimer = undefined;
       void (async () => {
+        if (flow.active === 'account' && flow.session) {
+          await runSync();
+          return;
+        }
         const config = syncConfig ?? await loadSyncConfig();
         if (config?.autoSync && config.url) await runAutoSync();
       })();
@@ -428,15 +521,19 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
   for (const event of [nativeApi?.onCreated, nativeApi?.onRemoved, nativeApi?.onChanged, nativeApi?.onMoved, nativeApi?.onChildrenReordered, nativeApi?.onImportEnded]) {
     event?.addListener(() => queueReconcile());
   }
-  onStoreWrite = () => {
+  onStoreWrite = async () => {
     queueReconcile(150);
     // Sync adopts remote rows through this same proxy. Those writes are not new local edits.
     // Explicit callers (native reconcile, conflict resolve, purge) still schedule while a sync runs.
     if (pushSuppressed) return;
+    if (flow.active === 'account') await markUnsynced(accountStore);
     schedulePush();
   };
-  queueReconcile(0);
   const runAutoSync = async () => {
+    if (flow.active === 'account' && flow.session) {
+      await runSync();
+      return;
+    }
     const config = syncConfig ?? await loadSyncConfig();
     if (!config?.autoSync || !config.url) {
       await api.alarms?.clear(AUTO_SYNC_ALARM);
@@ -445,9 +542,9 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
     const result = await runSync();
     if (result.status !== 'error' || result.retryable) return;
     syncConfig = { ...config, autoSync: false };
-    await repository.setSyncConfig(syncConfig);
-    const metadata = await repository.getSyncMetadata();
-    await repository.setSyncMetadata({ ...metadata, autoSync: false });
+    await store.setSyncConfig(syncConfig);
+    const metadata = await store.getSyncMetadata();
+    await store.setSyncMetadata({ ...metadata, autoSync: false });
     await api.alarms?.clear(AUTO_SYNC_ALARM);
   };
   const scheduleAutoSync = async () => {
@@ -465,15 +562,22 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
   api.alarms?.onAlarm?.addListener((alarm) => {
     if (alarm.name === AUTO_SYNC_ALARM) void runAutoSync();
   });
-  void loadSyncConfig().then(scheduleAutoSync);
   registerSaveEntrypoints(api, saveFromMenu, copyFor(languageFromApi(api)).contextSave);
+  void (async () => {
+    try {
+      const saved = await sessionStore.load();
+      if (saved) flow.adopt(saved);
+    } catch { /* an unreadable session stays on the unsigned library */ }
+    queueReconcile(0);
+    await loadSyncConfig().then(scheduleAutoSync);
+  })();
 
   api.runtime?.onMessage?.addListener((message: unknown, _sender: unknown, sendResponse) => {
     const type = typeof message === 'object' && message !== null && 'type' in message
       ? (message as { type?: string }).type : undefined;
     const payload = (message as { payload?: Record<string, any> }).payload ?? {};
     const accept = (work: () => Promise<unknown>) => {
-      const changesData = /^(lumamark-(save|add|undo|update-existing|copy-existing|collection-create|collection-update|collection-delete|collection-restore|resolve-conflict|favorite|update|delete|restore|reorder|set-toolbar|import|clean-duplicates|purge-trash))$/.test(type ?? '');
+      const changesData = /^(lumamark-(save|add|undo|update-existing|copy-existing|collection-create|collection-update|collection-delete|collection-restore|resolve-conflict|favorite|update|delete|restore|reorder|set-toolbar|import|clean-duplicates|purge-trash|account-login|account-choose|account-logout|account-switch))$/.test(type ?? '');
       void (changesData ? enqueueData(work) : work()).then(sendResponse).catch((error) => {
         const messageText = error instanceof Error ? error.message : String(error);
         const unsavable = /only http|unable to read the active page|url is required/i.test(messageText);
@@ -605,9 +709,12 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
     if (type === 'lumamark-list-conflicts') return accept(async () => ({ ok: true, items: await pruneNonConflicts(repository) }));
     if (type === 'lumamark-sync-status') return accept(async () => ({ ok: true, metadata: await repository.getSyncMetadata() }));
     if (type === 'lumamark-resolve-conflict') return accept(async () => {
+      const signedIn = flow.active === 'account' && flow.session;
       const config = syncConfig ?? await loadSyncConfig();
-      const client = config?.url ? webDavClient(config) : { async read() { return {}; }, async write() { return {}; } };
-      const engine = new WebDavSyncEngine(repository, client);
+      const client = signedIn
+        ? accountManifestClient(flow.session!, (input, init) => globalThis.fetch(input, init))
+        : config?.url ? webDavClient(config) : { async read() { return {}; }, async write() { return {}; } };
+      const engine = new WebDavSyncEngine(signedIn ? accountStore : repository, client);
       const resolution = (payload.resolution === 'remote' ? 'remote' : payload.resolution === 'merged' ? 'merged' : 'local') as ConflictResolution;
       const entries: Array<{ id: string; resolution: ConflictResolution; merged?: Bookmark }> = Array.isArray(payload.items)
         ? payload.items.map((entry: { id?: unknown; resolution?: ConflictResolution; merged?: Bookmark }) => ({
@@ -623,6 +730,7 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
             merged: payload.merged,
           }));
       const items = await engine.resolveConflicts(entries);
+      if (signedIn) await markUnsynced(accountStore);
       schedulePush();
       return { ok: true, item: items[0], items };
     });
@@ -739,15 +847,18 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
           autoSync: Boolean(config?.autoSync),
           configured: Boolean(config?.url),
         },
+        account: flow.active === 'account' && flow.session
+          ? { loggedIn: true, username: flow.session.username, serverUrl: flow.session.serverUrl }
+          : { loggedIn: false },
       };
     });
     if (type === 'lumamark-set-auto-sync') return accept(async () => {
       const current = syncConfig ?? await loadSyncConfig();
       if (!current?.url) return { ok: true, autoSync: false };
       syncConfig = { ...current, autoSync: Boolean(payload.autoSync) };
-      await repository.setSyncConfig(syncConfig);
-      const metadata = await repository.getSyncMetadata();
-      await repository.setSyncMetadata({ ...metadata, autoSync: syncConfig.autoSync });
+      await store.setSyncConfig(syncConfig);
+      const metadata = await store.getSyncMetadata();
+      await store.setSyncMetadata({ ...metadata, autoSync: syncConfig.autoSync });
       await scheduleAutoSync();
       return { ok: true, autoSync: syncConfig.autoSync };
     });
@@ -755,23 +866,23 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       const url = String(payload.url ?? '').trim();
       const path = String(payload.path ?? 'lumamark.json').trim() || 'lumamark.json';
       const username = payload.username ? String(payload.username) : undefined;
-      const previous = syncConfig ?? await repository.getSyncConfig();
+      const previous = syncConfig ?? await store.getSyncConfig();
       // An empty field must not wipe the stored secret; the page never redisplays it.
       const password = payload.password ? String(payload.password) : previous?.password;
       if (!url) {
         syncConfig = { key: 'sync-config', url: '', path, username, password, autoSync: false };
-        await repository.setSyncConfig(syncConfig);
-        const metadata = await repository.getSyncMetadata();
-        await repository.setSyncMetadata({ ...metadata, autoSync: false, status: 'idle', error: undefined });
+        await store.setSyncConfig(syncConfig);
+        const metadata = await store.getSyncMetadata();
+        await store.setSyncMetadata({ ...metadata, autoSync: false, status: 'idle', error: undefined });
         await scheduleAutoSync();
         return { ok: true, probe: 'empty', autoSync: false };
       }
       const probe = await probeWebDav({ url, path, username, password });
       const autoSync = probe.kind === 'ok';
       syncConfig = { key: 'sync-config', url, path, username, password, autoSync };
-      await repository.setSyncConfig(syncConfig);
-      const metadata = await repository.getSyncMetadata();
-      await repository.setSyncMetadata({
+      await store.setSyncConfig(syncConfig);
+      const metadata = await store.getSyncMetadata();
+      await store.setSyncMetadata({
         ...metadata,
         autoSync,
         status: probe.kind === 'ok' ? 'idle' : probe.kind === 'unreachable' ? 'offline' : 'error',
@@ -800,15 +911,51 @@ export function startBackground(api = resolveExtensionApi(), store = new Indexed
       const report = nativeEnabledMemory ? await reconcileNow() : undefined;
       return { ok: true, enabled: nativeEnabledMemory, report };
     });
+    if (type === 'lumamark-account-status') return accept(async () => ({
+      ok: true,
+      loggedIn: flow.active === 'account' && Boolean(flow.session),
+      username: flow.session?.username ?? '',
+      serverUrl: flow.session?.serverUrl ?? '',
+    }));
+    if (type === 'lumamark-account-login') return accept(async () => {
+      nativeSuspended += 1;
+      try {
+        return await flow.login({
+          serverUrl: String(payload.serverUrl ?? ''),
+          username: String(payload.username ?? ''),
+          password: String(payload.password ?? ''),
+        });
+      } finally { nativeSuspended -= 1; }
+    });
+    if (type === 'lumamark-account-choose') return accept(async () => {
+      const choice = payload.choice === 'overwrite' || payload.choice === 'merge' || payload.choice === 'cancel' ? payload.choice : 'cancel';
+      nativeSuspended += 1;
+      try { return await flow.choose(choice); } finally { nativeSuspended -= 1; }
+    });
+    if (type === 'lumamark-account-logout') return accept(async () => {
+      nativeSuspended += 1;
+      try { return await flow.logout(); } finally { nativeSuspended -= 1; }
+    });
+    if (type === 'lumamark-account-switch') return accept(async () => {
+      nativeSuspended += 1;
+      try {
+        return await flow.switchAccount({
+          serverUrl: String(payload.serverUrl ?? flow.session?.serverUrl ?? ''),
+          username: String(payload.username ?? ''),
+          password: String(payload.password ?? ''),
+        });
+      } finally { nativeSuspended -= 1; }
+    });
     if (type === 'lumamark-sync') return accept(async () => {
+      if (flow.active === 'account' && flow.session) return runSync();
       const config = syncConfig ?? await loadSyncConfig();
       if (!config?.url) return { ok: false, status: 'error', error: 'WebDAV is not configured' };
       const result = await runSync();
       if (result.status === 'error' && !result.retryable && config.autoSync) {
         syncConfig = { ...config, autoSync: false };
-        await repository.setSyncConfig(syncConfig);
-        const metadata = await repository.getSyncMetadata();
-        await repository.setSyncMetadata({ ...metadata, autoSync: false });
+        await store.setSyncConfig(syncConfig);
+        const metadata = await store.getSyncMetadata();
+        await store.setSyncMetadata({ ...metadata, autoSync: false });
       }
       return result;
     });

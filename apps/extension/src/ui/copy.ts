@@ -393,6 +393,21 @@ const en = {
   editsSaved: 'Changes to “{v}” saved.',
   showPassword: 'Show password',
   hidePassword: 'Hide password',
+  accountGroup: 'Account',
+  accountExplain: 'Sign in to the LumaMark server on this browser. Unsigned bookmarks stay in their own library and keep using WebDAV.',
+  accountServer: 'Server address',
+  accountSignIn: 'Sign in',
+  accountSignOut: 'Sign out',
+  accountSwitch: 'Switch account',
+  accountSwitchSubmit: 'Switch',
+  accountOverwrite: 'Use the account',
+  accountMerge: 'Merge',
+  accountChoiceTitle: 'This account already has bookmarks',
+  accountChoiceText: 'Use the account as it is, or merge it with the unsigned bookmarks on this browser.',
+  accountFailed: 'Could not sign in. Local bookmarks were not changed.',
+  accountSignedIn: 'Signed in as {name}',
+  accountNotSynced: 'Not synced yet',
+  keepMix: 'Keep a mix',
 };
 
 const zh: { [K in keyof typeof en]: string } = {
@@ -788,6 +803,21 @@ const zh: { [K in keyof typeof en]: string } = {
   editsSaved: '已保存对“{v}”的修改。',
   showPassword: '显示密码',
   hidePassword: '隐藏密码',
+  accountGroup: '账号',
+  accountExplain: '在这台浏览器上登录 LumaMark 服务。未登录书签仍留在原来的库里，并继续使用 WebDAV。',
+  accountServer: '服务地址',
+  accountSignIn: '登录',
+  accountSignOut: '退出',
+  accountSwitch: '切换账号',
+  accountSwitchSubmit: '切换',
+  accountOverwrite: '用账号覆盖',
+  accountMerge: '合并',
+  accountChoiceTitle: '这个账号已经有书签',
+  accountChoiceText: '可以只用账号里的书签，也可以和这台浏览器上未登录的书签合并。',
+  accountFailed: '登录没有完成。本机书签没有改动。',
+  accountSignedIn: '当前账号是 {name}',
+  accountNotSynced: '尚未同步',
+  keepMix: '保留混合结果',
 };
 
 export type Copy = { [K in keyof typeof en]: string };
