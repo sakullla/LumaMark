@@ -7,7 +7,9 @@ const css = readFileSync('apps/extension/src/styles/main.css', 'utf8');
 
 /** Every selector of every rule whose selector list mentions `.tree-row`. */
 function treeRowSelectors(): string[] {
-  return [...css.matchAll(/^([^{}@/][^{}]*)\{/gm)]
+  // Multiline ^ also matches between CR and LF. That newline is not `{`, `}`, `@`, or `/`,
+  // so the following comment would be captured into the next selector.
+  return [...css.matchAll(/^([^{}@/\r\n][^{}]*)\{/gm)]
     .flatMap((match) => match[1].split(','))
     .map((selector) => selector.trim())
     .filter((selector) => selector.includes('.tree-row'));
