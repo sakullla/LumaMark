@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>LumaMark</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 48rem; line-height: 1.5; padding: 0 1rem; }
+    form, section { display: grid; gap: 0.75rem; }
+    label { display: grid; gap: 0.25rem; }
+    input, textarea, button, select { font: inherit; padding: 0.45rem 0.6rem; }
+    button { width: fit-content; }
+    li, article { display: grid; gap: 0.35rem; margin: 1rem 0; }
+    #notice { min-height: 1.5rem; }
+  </style>
+</head>
+<body>
+  <h1>LumaMark</h1>
+  <p>这是你自己部署的书签服务。账号由部署者在服务器上创建，此页面不能注册。</p>
+  <noscript><p>浏览器没有运行页面脚本，因此这里不显示书签库。</p></noscript>
+  <div id="root"></div>
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

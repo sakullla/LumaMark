@@ -7,6 +7,7 @@
 | Firefox | Firefox WebExtension | 双向同步（书签工具栏、其他书签、书签菜单、移动设备书签、分隔线） | 支持 | 支持 | HTML/JSON | WebDAV | 临时包或签名包 |
 | Safari macOS | Safari Web Extension 包装 | 不支持（Safari 没有书签 API） | 支持 | 支持 | HTML/JSON | WebDAV | 只同步 LumaMark 自己的书签列表；需要 Xcode 包装、签名和 Apple 审核 |
 | Safari iOS/iPadOS | 不交付 | — | — | — | 可通过导出迁移 | — | 移动 Safari 不在首发范围 |
+| 网页 | 自行部署的服务页面 | 不读写浏览器书签栏 | 不保存当前页 | 可登录整理账号书签 | HTML/JSON | LumaMark 服务 | 可登录整理账号书签，不保存当前页，不读写浏览器书签栏 |
 
 所有平台共享同一数据模型和核心交互语义。在 Chrome、Edge 和 Firefox 上，LumaMark 把浏览器自带的书签当作书签本身：书签栏、其他书签、移动设备书签分别一一对应，不会额外创建文件夹。Chrome 和 Edge 没有“书签菜单”这个位置，Firefox 书签菜单里的书签在它们那里放在“其他书签”末尾；LumaMark 记得这些书签属于菜单，回到 Firefox 时仍在书签菜单里。在浏览器里新建、改名、移动、删除书签或调整顺序，会写进 LumaMark 并通过 WebDAV 同步到其他浏览器；其他浏览器的改动也会写回这台浏览器的书签。书签小程序（`javascript:`）和 `file:` 等非网页链接同样同步。分隔线只在 Firefox 之间同步，Chrome 和 Edge 没有分隔线。某个浏览器拒绝的地址（例如另一个浏览器的内部页面 `chrome://…`）不会放进这个浏览器，但仍保留在同步数据里，设置页会显示数量。企业策略管理的只读书签不参与同步，也不会被修改；Firefox 的 `place:` 动态列表不是书签，不同步。
 
