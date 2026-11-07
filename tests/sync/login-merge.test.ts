@@ -203,17 +203,16 @@ describe('login merge', () => {
     const collapsed = result.bookmarks.filter((item) => urlKey(item.url) === urlKey('https://example.com/item') && chainOf(result.collections, item.collectionId).join('/') === 'Docs');
     expect(collapsed).toHaveLength(1);
     expect(collapsed[0]).toMatchObject({
-      id: 'acc-new',
-      title: 'Account title',
-      notes: 'account notes',
-      tags: ['keep', 'account'],
-      favorite: true,
-      deletedAt: '2026-02-01T00:00:00.000Z',
-      url: 'https://Example.com/item',
-      position: 3,
-      revision: 5,
+      id: 'acc-old',
+      title: 'Old account',
+      notes: 'old',
+      tags: ['old'],
+      favorite: false,
+      url: 'https://example.com/item',
+      revision: 2,
     });
-    expect(result.bookmarks.some((item) => item.id === 'gst' || item.id === 'gst-2' || item.id === 'acc-old')).toBe(false);
+    expect(collapsed[0].deletedAt).toBeUndefined();
+    expect(result.bookmarks.some((item) => item.id === 'gst' || item.id === 'gst-2' || item.id === 'acc-new')).toBe(false);
 
     const keptGuest = result.bookmarks.find((item) => item.id === 'guest-only');
     expect(keptGuest).toEqual({ ...guestOnly, collectionId: 'af' });
@@ -271,5 +270,187 @@ describe('login merge', () => {
     expect(merged.bookmarks.map((item) => item.id)).toEqual(['kept']);
     expect(merged.purged).toEqual(['blocked']);
     expect(merged.bookmarks.some((item) => item.title === 'Do not restore')).toBe(false);
+  });
+
+  it('keeps a live folder when a deleted folder has the same name chain', () => {
+    const deletedAt = '2026-04-01T00:00:00.000Z';
+    const alongside = mergeLoginLibraries(
+      {
+        bookmarks: [bookmark('live-mark', 'https://example.com/live', { collectionId: 'new-work', title: 'Live' })],
+        collections: [
+          folder('old-work', 'Work', undefined, { deletedAt, revision: 4 }),
+          folder('new-work', 'Work', undefined, { revision: 1 }),
+        ],
+      },
+      { bookmarks: [], collections: [] },
+    );
+    const liveWork = alongside.collections.filter((item) => item.name.trim() === 'Work' && !item.deletedAt);
+    expect(liveWork).toEqual([expect.objectContaining({ id: 'new-work' })]);
+    expect(alongside.collections.some((item) => item.id === 'old-work' || item.deletedAt)).toBe(false);
+    expect(alongside.bookmarks.find((item) => item.id === 'live-mark')?.collectionId).toBe('new-work');
+
+    const fromGuest = mergeLoginLibraries(
+      {
+        bookmarks: [],
+        collections: [folder('dead-work', 'Work', undefined, { deletedAt, revision: 9 })],
+      },
+      {
+        bookmarks: [bookmark('paper', 'https://example.com/paper', { collectionId: 'g-papers', title: 'Paper' })],
+        collections: [
+          folder('g-work', 'Work'),
+          folder('g-papers', 'Papers', 'g-work'),
+        ],
+      },
+    );
+    const work = fromGuest.collections.find((item) => item.name.trim() === 'Work');
+    const papers = fromGuest.collections.find((item) => item.name.trim() === 'Papers');
+    expect(work?.deletedAt).toBeUndefined();
+    expect(papers?.deletedAt).toBeUndefined();
+    expect(papers?.parentId).toBe(work?.id);
+    expect(papers?.parentId).not.toBe('dead-work');
+    expect(chainOf(fromGuest.collections, papers?.id)).toEqual(['Work', 'Papers']);
+    expect(chainOf(fromGuest.collections, fromGuest.bookmarks.find((item) => item.id === 'paper')?.collectionId)).toEqual(['Work', 'Papers']);
+    expect(fromGuest.collections.some((item) => item.deletedAt)).toBe(false);
+  });
+
+  it('assigns a distinct folder id to each name chain', () => {
+    const result = mergeLoginLibraries(
+      {
+        bookmarks: [bookmark('account-page', 'https://example.com/account-page', { collectionId: 'f1', title: 'Account page' })],
+        collections: [folder('f1', 'Work')],
+      },
+      {
+        bookmarks: [bookmark('guest-page', 'https://example.com/guest-page', { collectionId: 'f1', title: 'Guest page' })],
+        collections: [
+          folder('f1', 'Reading'),
+          folder('papers', 'Papers', 'f1'),
+        ],
+      },
+    );
+    const work = result.collections.find((item) => item.name.trim() === 'Work');
+    const reading = result.collections.find((item) => item.name.trim() === 'Reading');
+    const papers = result.collections.find((item) => item.name.trim() === 'Papers');
+    expect(work).toBeDefined();
+    expect(reading).toBeDefined();
+    expect(papers?.parentId).toBe(reading?.id);
+    expect(work?.id).not.toBe(reading?.id);
+    expect(papers?.parentId).not.toBe(work?.id);
+    expect(new Set(result.collections.map((item) => item.id)).size).toBe(result.collections.length);
+    expect(result.bookmarks.find((item) => item.id === 'account-page')?.collectionId).toBe(work?.id);
+    expect(result.bookmarks.find((item) => item.id === 'guest-page')?.collectionId).toBe(reading?.id);
+    expect(chainOf(result.collections, work?.id)).toEqual(['Work']);
+    expect(chainOf(result.collections, reading?.id)).toEqual(['Reading']);
+    expect(chainOf(result.collections, papers?.id)).toEqual(['Reading', 'Papers']);
+  });
+
+  it('keeps a live bookmark when the same key also has a deleted record', () => {
+    const deletedAt = '2026-05-01T00:00:00.000Z';
+    const guestOnly = mergeLoginLibraries(
+      { bookmarks: [], collections: [] },
+      {
+        bookmarks: [
+          bookmark('old', 'https://example.com/item', { collectionId: 'gf', deletedAt, revision: 2, title: 'Old' }),
+          bookmark('fresh', 'https://example.com/item', { collectionId: 'gf', revision: 1, title: 'Fresh' }),
+        ],
+        collections: [folder('gf', 'Inbox')],
+      },
+    );
+    expect(guestOnly.bookmarks.map((item) => item.id)).toEqual(['fresh']);
+    expect(guestOnly.bookmarks[0]).toMatchObject({ title: 'Fresh', revision: 1 });
+    expect(guestOnly.bookmarks[0].deletedAt).toBeUndefined();
+
+    const accountMixed = mergeLoginLibraries(
+      {
+        bookmarks: [
+          bookmark('acc-deleted', 'https://example.com/mix', {
+            collectionId: 'af',
+            deletedAt,
+            revision: 5,
+            title: 'Deleted account',
+            notes: 'deleted',
+            tags: ['deleted'],
+            favorite: false,
+          }),
+          bookmark('acc-live', 'https://example.com/mix', {
+            collectionId: 'af',
+            revision: 1,
+            title: 'Live account',
+            notes: 'live',
+            tags: ['live'],
+            favorite: true,
+          }),
+        ],
+        collections: [folder('af', 'Inbox')],
+      },
+      {
+        bookmarks: [bookmark('guest-live', 'https://example.com/mix', { collectionId: 'gf', revision: 9, title: 'Guest', notes: 'guest', favorite: false })],
+        collections: [folder('gf', 'Inbox')],
+      },
+    );
+    expect(accountMixed.bookmarks.map((item) => item.id)).toEqual(['acc-live']);
+    expect(accountMixed.bookmarks[0]).toMatchObject({
+      title: 'Live account',
+      notes: 'live',
+      tags: ['live'],
+      favorite: true,
+    });
+    expect(accountMixed.bookmarks[0].deletedAt).toBeUndefined();
+
+    const accountDeleted = mergeLoginLibraries(
+      {
+        bookmarks: [bookmark('acc-gone', 'https://example.com/gone', {
+          collectionId: 'af',
+          deletedAt,
+          revision: 2,
+          title: 'Account gone',
+          notes: 'gone',
+          tags: ['gone'],
+          favorite: true,
+        })],
+        collections: [folder('af', 'Inbox')],
+      },
+      {
+        bookmarks: [bookmark('guest-live', 'https://example.com/gone', {
+          collectionId: 'gf',
+          revision: 8,
+          title: 'Guest live',
+          notes: 'guest',
+          tags: ['guest'],
+          favorite: false,
+        })],
+        collections: [folder('gf', 'Inbox')],
+      },
+    );
+    expect(accountDeleted.bookmarks).toHaveLength(1);
+    expect(accountDeleted.bookmarks[0]).toMatchObject({
+      id: 'acc-gone',
+      title: 'Account gone',
+      notes: 'gone',
+      tags: ['gone'],
+      favorite: true,
+      deletedAt,
+    });
+  });
+
+  it('keeps cleared ids reserved when a conflicting bookmark needs a new id', () => {
+    const result = mergeLoginLibraries(
+      {
+        bookmarks: [bookmark('guest', 'https://example.com/account', { title: 'Account' })],
+        collections: [],
+        purged: ['guest#2'],
+      },
+      {
+        bookmarks: [bookmark('guest', 'https://example.com/guest', { title: 'Guest page', notes: 'other' })],
+        collections: [],
+        purged: ['guest#3'],
+      },
+    );
+    const guestMark = result.bookmarks.find((item) => item.title === 'Guest page');
+    expect(result.purged).toEqual(['guest#2', 'guest#3']);
+    expect(result.bookmarks.map((item) => item.id)).not.toContain('guest#2');
+    expect(result.bookmarks.map((item) => item.id)).not.toContain('guest#3');
+    expect(result.bookmarks.find((item) => item.url === 'https://example.com/account')?.id).toBe('guest');
+    expect(guestMark?.id).toBe('guest#4');
+    expect(guestMark).toMatchObject({ notes: 'other', url: 'https://example.com/guest' });
   });
 });

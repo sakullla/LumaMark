@@ -25,7 +25,7 @@ interface Ranked {
  */
 export function folderNameChain(collections: readonly Collection[], collectionId: string | undefined): string[] {
   if (!collectionId) return [];
-  const byId = new Map(dedupe(collections).map((folder) => [folder.id, folder]));
+  const byId = new Map(dedupe(collections, isLiveFolder).map((folder) => [folder.id, folder]));
   const names: string[] = [];
   const seen = new Set<string>();
   let current: string | undefined = collectionId;
@@ -59,8 +59,8 @@ export function bookmarkMergeKey(bookmark: Pick<Bookmark, 'url' | 'collectionId'
 
 /** An account is empty when it has no bookmark or folder that is still live. */
 export function isEmptyAccount(library: Pick<LoginLibrary, 'bookmarks' | 'collections'>): boolean {
-  const liveBookmark = library.bookmarks.some((bookmark) => bookmark && !bookmark.deletedAt && !bookmark.purgedAt);
-  const liveFolder = library.collections.some((folder) => folder && !folder.deletedAt);
+  const liveBookmark = library.bookmarks.some((bookmark) => bookmark && isLiveBookmark(bookmark));
+  const liveFolder = library.collections.some((folder) => folder && isLiveFolder(folder));
   return !liveBookmark && !liveFolder;
 }
 
@@ -92,14 +92,17 @@ export function copyUnauthenticatedLibrary(account: LoginLibrary, guest: LoginLi
  * Collapse both libraries by folder name chain and urlKey.
  * One-sided bookmarks keep their id and folder chain. A shared key keeps the account id
  * and the account title, notes, tags, favorite, and deletion state.
+ * A live record on that key wins over a deleted one on the same side.
  */
 export function mergeLoginLibraries(account: LoginLibrary, guest: LoginLibrary): LoginMergeResult {
-  const accountFolders = dedupe(account.collections);
-  const guestFolders = dedupe(guest.collections);
+  const accountFolders = dedupe(account.collections, isLiveFolder);
+  const guestFolders = dedupe(guest.collections, isLiveFolder);
   const canonical = canonicalFolders(accountFolders, guestFolders);
-  const blocked = new Set(uniqueIds(account.purged));
-  const guestBookmarks = dedupe(guest.bookmarks).filter((bookmark) => !blocked.has(bookmark.id));
-  const accountGroups = groupBookmarks(dedupe(account.bookmarks), accountFolders);
+  const folderIds = assignFolderIds(canonical);
+  const purged = uniqueIds([...(account.purged ?? []), ...(guest.purged ?? [])]);
+  const blocked = new Set(purged);
+  const guestBookmarks = dedupe(guest.bookmarks, isLiveBookmark).filter((bookmark) => !blocked.has(bookmark.id));
+  const accountGroups = groupBookmarks(dedupe(account.bookmarks, isLiveBookmark), accountFolders);
   const guestGroups = groupBookmarks(guestBookmarks, guestFolders);
 
   const chosen: Array<{ fromAccount: boolean; bookmark: Bookmark; collectionId: string | undefined }> = [];
@@ -107,17 +110,17 @@ export function mergeLoginLibraries(account: LoginLibrary, guest: LoginLibrary):
     const accountItems = accountGroups.get(key) ?? [];
     const guestItems = guestGroups.get(key) ?? [];
     const fromAccount = accountItems.length > 0;
-    const source = fromAccount ? prefer(accountItems) : prefer(guestItems);
+    const source = fromAccount ? preferLive(accountItems, isLiveBookmark) : preferLive(guestItems, isLiveBookmark);
     if (!source) continue;
     const collections = fromAccount ? accountFolders : guestFolders;
     chosen.push({
       fromAccount,
       bookmark: source,
-      collectionId: canonicalCollectionId(source, collections, canonical),
+      collectionId: canonicalCollectionId(source, collections, folderIds),
     });
   }
 
-  const taken = new Set<string>();
+  const taken = new Set<string>(purged);
   const bookmarks: Bookmark[] = [];
   for (const item of chosen.filter((entry) => entry.fromAccount)) {
     taken.add(item.bookmark.id);
@@ -129,28 +132,27 @@ export function mergeLoginLibraries(account: LoginLibrary, guest: LoginLibrary):
     bookmarks.push(cloneBookmark({ ...item.bookmark, id }, item.collectionId));
   }
 
-  const collections = [...canonical.entries()].map(([key, folder]) => {
+  const collections = [...canonical.keys()].sort(compareId).map((key) => {
+    const folder = canonical.get(key);
+    const id = folderIds.get(key);
+    if (!folder || !id) return undefined;
     const chain = JSON.parse(key) as string[];
-    const parent = chain.length > 1 ? canonical.get(JSON.stringify(chain.slice(0, -1))) : undefined;
-    return placeFolder(folder, parent?.id);
-  });
+    return placeFolder({ ...folder, id }, assignedParentId(chain, folder, canonical, folderIds));
+  }).filter((folder): folder is Collection => folder !== undefined);
   bookmarks.sort(comparePositionThenId);
   collections.sort(comparePositionThenId);
-
-  const liveIds = new Set(bookmarks.filter((bookmark) => !bookmark.purgedAt).map((bookmark) => bookmark.id));
-  const purged = uniqueIds(account.purged).filter((id) => !liveIds.has(id));
   return { bookmarks, collections, purged };
 }
 
 function canonicalCollectionId(
   bookmark: Bookmark,
   collections: readonly Collection[],
-  canonical: ReadonlyMap<string, Collection>,
+  folderIds: ReadonlyMap<string, string>,
 ): string | undefined {
   if (!bookmark.collectionId) return undefined;
   const chain = folderNameChain(collections, bookmark.collectionId);
   if (!chain.length) return bookmark.collectionId;
-  return canonical.get(JSON.stringify(chain))?.id ?? bookmark.collectionId;
+  return folderIds.get(JSON.stringify(chain)) ?? bookmark.collectionId;
 }
 
 function canonicalFolders(accountFolders: readonly Collection[], guestFolders: readonly Collection[]): Map<string, Collection> {
@@ -170,10 +172,51 @@ function canonicalFolders(accountFolders: readonly Collection[], guestFolders: r
 
   const canonical = new Map<string, Collection>();
   for (const [key, group] of groups) {
-    const winner = group.account.length ? prefer(group.account) : prefer(group.guest);
+    const winner = chooseFolder(group.account, group.guest);
     if (winner) canonical.set(key, winner);
   }
   return canonical;
+}
+
+/** A live folder on either side represents the chain. A deleted folder must not take that place. */
+function chooseFolder(account: readonly Collection[], guest: readonly Collection[]): Collection | undefined {
+  const accountLive = account.filter(isLiveFolder);
+  if (accountLive.length) return prefer(accountLive);
+  const guestLive = guest.filter(isLiveFolder);
+  if (guestLive.length) return prefer(guestLive);
+  if (account.length) return prefer(account);
+  return prefer(guest);
+}
+
+function assignFolderIds(canonical: ReadonlyMap<string, Collection>): Map<string, string> {
+  const assigned = new Map<string, string>();
+  const used = new Set<string>();
+  for (const key of [...canonical.keys()].sort(compareId)) {
+    const folder = canonical.get(key);
+    if (!folder) continue;
+    const id = unusedId(folder.id, used);
+    used.add(id);
+    assigned.set(key, id);
+  }
+  return assigned;
+}
+
+/** Deleted folders stay in the result, but they are not parents of a folder that is still live. */
+function assignedParentId(
+  chain: readonly string[],
+  child: Collection,
+  canonical: ReadonlyMap<string, Collection>,
+  folderIds: ReadonlyMap<string, string>,
+): string | undefined {
+  for (let length = chain.length - 1; length >= 1; length -= 1) {
+    const key = JSON.stringify(chain.slice(0, length));
+    const parent = canonical.get(key);
+    const parentId = folderIds.get(key);
+    if (!parent || !parentId) continue;
+    if (isLiveFolder(child) && !isLiveFolder(parent)) continue;
+    return parentId;
+  }
+  return undefined;
 }
 
 function groupBookmarks(bookmarks: readonly Bookmark[], collections: readonly Collection[]): Map<string, Bookmark[]> {
@@ -187,17 +230,24 @@ function groupBookmarks(bookmarks: readonly Bookmark[], collections: readonly Co
   return groups;
 }
 
-function dedupe<T extends Ranked>(items: readonly T[]): T[] {
+function dedupe<T extends Ranked>(items: readonly T[], isLive: (item: T) => boolean): T[] {
   const byId = new Map<string, T>();
   for (const item of items) {
     if (!item?.id) continue;
     const current = byId.get(item.id);
-    if (!current || outranks(item, current)) byId.set(item.id, item);
+    if (!current || better(item, current, isLive)) byId.set(item.id, item);
   }
   return [...byId.values()];
 }
 
-/** Higher revision, then later updatedAt, then smaller id. */
+/** A live record outranks a deleted one. Otherwise higher revision, then later updatedAt, then smaller id. */
+function better<T extends Ranked>(candidate: T, current: T, isLive: (item: T) => boolean): boolean {
+  const candidateLive = isLive(candidate);
+  const currentLive = isLive(current);
+  if (candidateLive !== currentLive) return candidateLive;
+  return outranks(candidate, current);
+}
+
 function outranks(candidate: Ranked, current: Ranked): boolean {
   if (candidate.revision !== current.revision) return candidate.revision > current.revision;
   if (candidate.updatedAt !== current.updatedAt) return candidate.updatedAt > current.updatedAt;
@@ -206,6 +256,19 @@ function outranks(candidate: Ranked, current: Ranked): boolean {
 
 function prefer<T extends Ranked>(items: readonly T[]): T | undefined {
   return items.reduce<T | undefined>((best, item) => (!best || outranks(item, best) ? item : best), undefined);
+}
+
+function preferLive<T extends Ranked>(items: readonly T[], isLive: (item: T) => boolean): T | undefined {
+  const live = items.filter(isLive);
+  return prefer(live.length ? live : items);
+}
+
+function isLiveBookmark(bookmark: Bookmark): boolean {
+  return !bookmark.deletedAt && !bookmark.purgedAt;
+}
+
+function isLiveFolder(folder: Collection): boolean {
+  return !folder.deletedAt;
 }
 
 function uniqueIds(ids: readonly string[] | undefined): string[] {
