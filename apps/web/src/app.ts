@@ -1,4 +1,4 @@
-import type { Bookmark } from '../../../packages/domain/src/index';
+import { applyBookmarkUpdate, domainFromUrl, normalizeBookmarkUrl, type Bookmark, type ConflictField } from '../../../packages/domain/src/index';
 import type { DuplicateImportAction, ImportResult } from '../../../packages/import-export/src/index';
 import { AccountClient, WebRequestError, type FetchLike } from './client';
 import {
@@ -10,6 +10,7 @@ import {
   escapeHtml,
   exportHtml,
   exportJson,
+  folderFor,
   folderName,
   libraryFromManifest,
   librarySignature,
@@ -23,6 +24,8 @@ import {
   type BookmarkFilter,
   type BookmarkInput,
   type BookmarkPatch,
+  type ConflictChoice,
+  type ConflictKeep,
   type LibraryModel,
   type TitleConflict,
 } from './library';
@@ -55,7 +58,7 @@ export interface WebApp {
   cancelImport(): void;
   exportJson(): string;
   exportHtml(): string;
-  chooseConflict(bookmarkId: string, keep: 'local' | 'remote'): Promise<void>;
+  chooseConflict(bookmarkId: string, keep: ConflictKeep, patch?: BookmarkPatch & { deleted?: boolean }): Promise<void>;
   visibleBookmarks(): Bookmark[];
   render(): string;
   snapshot(): WebSnapshot;
@@ -90,7 +93,7 @@ interface PendingConflict {
   attempted: LibraryModel;
   remote: LibraryModel;
   etag: string;
-  choices: Map<string, 'local' | 'remote'>;
+  choices: Map<string, ConflictChoice>;
   conflicts: TitleConflict[];
 }
 
@@ -148,6 +151,19 @@ export function bindWebApp(root: PageRoot, app: WebApp): void {
         tags: splitTags(value('tags')),
         notes: value('notes'),
         favorite: checked('favorite'),
+      }));
+      return;
+    }
+    if (form.getAttribute?.('data-action') === 'merge-conflict') {
+      const deleted = form.elements?.deleted;
+      finish(app.chooseConflict(form.getAttribute('data-bookmark-id') ?? '', 'merged', {
+        title: value('title'),
+        url: value('url'),
+        folder: value('folder'),
+        tags: splitTags(value('tags')),
+        notes: value('notes'),
+        favorite: checked('favorite'),
+        ...(deleted ? { deleted: Boolean(deleted.checked) } : {}),
       }));
     }
   });
@@ -335,11 +351,16 @@ class WebController implements WebApp {
     return this.lastExport;
   }
 
-  async chooseConflict(bookmarkId: string, keep: 'local' | 'remote'): Promise<void> {
-    if (!this.pending) throw new Error('没有需要选择的标题');
-    if (!this.pending.conflicts.some((conflict) => conflict.bookmarkId === bookmarkId)) throw new Error('没有这条书签的标题冲突');
-    this.pending.choices.set(bookmarkId, keep);
-    if (this.pending.conflicts.some((conflict) => !this.pending?.choices.has(conflict.bookmarkId))) return;
+  async chooseConflict(bookmarkId: string, keep: ConflictKeep, patch?: BookmarkPatch & { deleted?: boolean }): Promise<void> {
+    if (!this.pending) throw new Error('没有需要选择的版本');
+    const conflict = this.pending.conflicts.find((item) => item.bookmarkId === bookmarkId);
+    if (!conflict) throw new Error('没有这条书签的冲突');
+    if (keep === 'merged' && !patch) throw new Error('合并需要给出要保留的内容');
+    const choice: ConflictChoice = keep === 'merged'
+      ? { keep, bookmark: this.bookmarkForMerge(conflict.local, patch ?? {}) }
+      : { keep };
+    this.pending.choices.set(bookmarkId, choice);
+    if (this.pending.conflicts.some((item) => !this.pending?.choices.has(item.bookmarkId))) return;
     const merged = mergeTitleChoices(this.pending.attempted, this.pending.remote, this.pending.choices, this.now());
     const etag = this.pending.etag;
     try {
@@ -462,8 +483,34 @@ class WebController implements WebApp {
       return;
     }
     this.mode = 'conflict';
-    this.message = '同一条书签有两个标题，选择要保留的一个。账号还没有改成其中任何一个。';
+    this.message = '同一条书签两边都改过，选择要保留的版本。选择完成前不会写回账号。';
     this.pending = { attempted, remote: remoteModel, etag: remote.etag, choices: new Map(), conflicts };
+  }
+
+  private bookmarkForMerge(base: Bookmark, patch: BookmarkPatch & { deleted?: boolean }): Bookmark {
+    const library = this.pending?.attempted;
+    let collectionId = patch.folder === undefined ? undefined : null as string | null;
+    if (patch.folder !== undefined && library && this.pending) {
+      const placed = folderFor(library, patch.folder, this.now());
+      this.pending.attempted = placed.model;
+      collectionId = placed.collectionId ?? null;
+    }
+    let bookmark = applyBookmarkUpdate(base, {
+      title: patch.title,
+      notes: patch.notes,
+      tags: patch.tags,
+      favorite: patch.favorite,
+      collectionId,
+    }, this.now());
+    if (patch.url !== undefined) {
+      const url = normalizeBookmarkUrl(patch.url);
+      bookmark = { ...bookmark, url, domain: domainFromUrl(url) };
+    }
+    if (patch.deleted === true) bookmark = { ...bookmark, deletedAt: this.now() };
+    else if (patch.deleted === false) delete bookmark.deletedAt;
+    else if (base.deletedAt) bookmark = { ...bookmark, deletedAt: base.deletedAt };
+    else delete bookmark.deletedAt;
+    return { ...bookmark, id: base.id };
   }
 
   private showOffline(): void {
@@ -553,15 +600,40 @@ class WebController implements WebApp {
   }
 
   private renderConflicts(): string {
-    const items = (this.pending?.conflicts ?? []).map((conflict) => `<article data-bookmark-id="${escapeHtml(conflict.bookmarkId)}">` +
-      `<h2>选择要保留的标题</h2>` +
-      `<p data-title-source="local">${escapeHtml(conflict.localTitle)}</p>` +
-      `<p data-title-source="remote">${escapeHtml(conflict.remoteTitle)}</p>` +
-      `<button type="button" data-keep="local" data-bookmark-id="${escapeHtml(conflict.bookmarkId)}">保留网页上的标题</button>` +
-      `<button type="button" data-keep="remote" data-bookmark-id="${escapeHtml(conflict.bookmarkId)}">保留服务上的标题</button>` +
-      `</article>`).join('');
+    const localLibrary = this.pending?.attempted;
+    const remoteLibrary = this.pending?.remote;
+    const items = (this.pending?.conflicts ?? []).map((conflict) => {
+      const localFolder = localLibrary ? folderName(localLibrary, conflict.local.collectionId) : '';
+      const remoteFolder = remoteLibrary ? folderName(remoteLibrary, conflict.remote.collectionId) : '';
+      const fields = conflict.fields.filter((field) => field !== 'title').map((field) => (
+        `<p data-field="${field}" data-side="local">${escapeHtml(conflictValue(conflict.local, field, localFolder))}</p>` +
+        `<p data-field="${field}" data-side="remote">${escapeHtml(conflictValue(conflict.remote, field, remoteFolder))}</p>`
+      )).join('');
+      const deleted = conflict.fields.includes('deletedAt')
+        ? `<label>删除 <input name="deleted" type="checkbox"${conflict.local.deletedAt ? ' checked' : ''}></label>`
+        : '';
+      return `<article data-bookmark-id="${escapeHtml(conflict.bookmarkId)}">` +
+        `<h2>选择要保留的版本</h2>` +
+        `<p data-title-source="local">${escapeHtml(conflict.localTitle)}</p>` +
+        `<p data-title-source="remote">${escapeHtml(conflict.remoteTitle)}</p>` +
+        fields +
+        `<button type="button" data-keep="local" data-bookmark-id="${escapeHtml(conflict.bookmarkId)}">保留网页版本</button>` +
+        `<button type="button" data-keep="remote" data-bookmark-id="${escapeHtml(conflict.bookmarkId)}">保留服务版本</button>` +
+        `<form data-action="merge-conflict" data-bookmark-id="${escapeHtml(conflict.bookmarkId)}">${bookmarkFields(conflict.local, localFolder)}${deleted}<button type="submit">合并两边</button></form>` +
+        `</article>`;
+    }).join('');
     return `<section id="conflicts">${items}</section>`;
   }
+}
+
+function conflictValue(bookmark: Bookmark, field: ConflictField, folder: string): string {
+  if (field === 'url') return bookmark.url;
+  if (field === 'title') return bookmark.title;
+  if (field === 'notes') return bookmark.notes;
+  if (field === 'tags') return bookmark.tags.join(', ');
+  if (field === 'collectionId') return folder || '未分类';
+  if (field === 'favorite') return bookmark.favorite ? '已收藏' : '未收藏';
+  return bookmark.deletedAt ? '已删除' : '未删除';
 }
 
 function loginForm(): string {

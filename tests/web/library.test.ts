@@ -340,6 +340,36 @@ describe('web bookmark library', () => {
     expect(JSON.stringify(remote.manifest('甲'))).not.toContain('网页标题');
   });
 
+  it('waits for a choice when a 412 changes notes or favorite but not the title', async () => {
+    const server = new MemoryAccounts(['甲']);
+    const app = appFor(server);
+    await app.login('甲', password);
+    await app.addBookmark({ title: '同一标题', url: 'https://example.com/same-title', notes: '原来的备注', favorite: false });
+    const current = server.manifest('甲');
+    current.bookmarks[0].notes = '服务备注';
+    current.bookmarks[0].favorite = true;
+    server.replaceManifest('甲', current as SyncManifest);
+    const attempts = server.putAttempts;
+    await app.updateBookmark(current.bookmarks[0].id, { notes: '网页新备注' });
+    expect(server.putAttempts).toBe(attempts + 1);
+    expect(server.manifest('甲').bookmarks[0]).toMatchObject({ title: '同一标题', notes: '服务备注', favorite: true });
+    expect(app.snapshot().mode).toBe('conflict');
+    const html = app.render();
+    expect(html).toContain('选择完成前不会写回账号');
+    expect(html).toContain('<p data-title-source="local">同一标题</p>');
+    expect(html).toContain('<p data-title-source="remote">同一标题</p>');
+    expect(html).toContain('<p data-field="notes" data-side="local">网页新备注</p>');
+    expect(html).toContain('<p data-field="notes" data-side="remote">服务备注</p>');
+    expect(html).toContain('<p data-field="favorite" data-side="local">未收藏</p>');
+    expect(html).toContain('<p data-field="favorite" data-side="remote">已收藏</p>');
+    expect(html).toContain('保留网页版本');
+    expect(html).toContain('保留服务版本');
+    expect(html).toContain('合并两边');
+    await app.chooseConflict(current.bookmarks[0].id, 'merged', { notes: '合并备注' });
+    expect(server.putAttempts).toBe(attempts + 2);
+    expect(server.manifest('甲').bookmarks[0]).toMatchObject({ title: '同一标题', notes: '合并备注', favorite: false });
+  });
+
   it('keeps a failed login offline state from looking like an empty library', async () => {
     const server = new MemoryAccounts(['甲']);
     const app = appFor(server);
@@ -457,6 +487,37 @@ afterEach(async () => {
 });
 
 describe('web client against the account server', () => {
+  it('serves a browser library page that calls startWebApp and its script', async () => {
+    const dataDir = await makeDir();
+    const server = await startServer(dataDir);
+    const page = await fetch(`${server.url}/`);
+    const index = await fetch(`${server.url}/index.html`);
+    expect(page.status).toBe(200);
+    expect(index.status).toBe(200);
+    expect(page.headers.get('content-type')).toMatch(/text\/html/);
+    const html = await page.text();
+    expect(await index.text()).toBe(html);
+    expect(html).toContain('startWebApp()');
+    expect(html).toContain("from '/web.js'");
+    expect(html).not.toContain('main.ts');
+    expect(html).toContain('不能注册');
+    expect(html).toContain('>登录<');
+    const script = await fetch(`${server.url}/web.js`);
+    expect(script.status).toBe(200);
+    expect(script.headers.get('content-type')).toMatch(/javascript/);
+    const source = await script.text();
+    expect(source).toContain('startWebApp');
+    expect(source).toContain('新增书签');
+    expect(source).toContain('回收站');
+    expect(source).toContain('搜索');
+    expect(source).toContain('导入');
+    expect(source).toContain('导出 JSON');
+    expect(source).not.toContain('interface PageRoot');
+    expect(source).not.toContain("from './src/main.ts'");
+    expect((await fetch(`${server.url}/src/main.ts`)).status).toBe(404);
+    expect((await fetch(`${server.url}/apps/web/src/app.ts`)).status).toBe(404);
+  }, 30000);
+
   it('writes through manifest preconditions and keeps the other session', async () => {
     const dataDir = await makeDir();
     await createAccount(dataDir, 'jia', 'jia-password');

@@ -2,6 +2,7 @@ import {
   applyBookmarkUpdate,
   type Bookmark,
   type Collection,
+  type ConflictField,
   conflictFields,
   CURRENT_SCHEMA_VERSION,
   domainFromUrl,
@@ -55,6 +56,16 @@ export interface TitleConflict {
   bookmarkId: string;
   localTitle: string;
   remoteTitle: string;
+  fields: ConflictField[];
+  local: Bookmark;
+  remote: Bookmark;
+}
+
+export type ConflictKeep = 'local' | 'remote' | 'merged';
+
+export interface ConflictChoice {
+  keep: ConflictKeep;
+  bookmark?: Bookmark;
 }
 
 export function escapeHtml(value: string): string {
@@ -111,7 +122,7 @@ export function folderName(model: LibraryModel, collectionId: string | undefined
   return model.collections.find((collection) => collection.id === collectionId)?.name ?? '';
 }
 
-function ensureFolder(model: LibraryModel, name: string | undefined, now: string): { model: LibraryModel; collectionId?: string } {
+export function folderFor(model: LibraryModel, name: string | undefined, now: string): { model: LibraryModel; collectionId?: string } {
   const trimmed = name?.trim() ?? '';
   if (!trimmed) return { model, collectionId: undefined };
   const existing = model.collections.find((collection) => !collection.deletedAt && !collection.parentId && collection.name === trimmed);
@@ -129,7 +140,7 @@ function ensureFolder(model: LibraryModel, name: string | undefined, now: string
 }
 
 export function addBookmark(model: LibraryModel, input: BookmarkInput, now: string): LibraryModel {
-  const ensured = ensureFolder(model, input.folder, now);
+  const ensured = folderFor(model, input.folder, now);
   const bookmark = makeBookmark({
     url: input.url,
     title: input.title,
@@ -147,7 +158,7 @@ export function updateBookmark(model: LibraryModel, id: string, patch: BookmarkP
   const current = model.bookmarks.find((bookmark) => bookmark.id === id);
   if (!current || current.purgedAt || model.purged.includes(id)) throw new Error('Bookmark not found');
   if (current.deletedAt) throw new Error('Bookmark is in trash');
-  const ensured = patch.folder === undefined ? { model, collectionId: current.collectionId } : ensureFolder(model, patch.folder, now);
+  const ensured = patch.folder === undefined ? { model, collectionId: current.collectionId } : folderFor(model, patch.folder, now);
   let updated = applyBookmarkUpdate(current, {
     title: patch.title,
     notes: patch.notes,
@@ -289,13 +300,29 @@ export function exportHtml(model: LibraryModel): string {
   return `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n<TITLE>Bookmarks</TITLE>\n<H1>Bookmarks</H1>\n<DL><p>\n${children(undefined)}</DL><p>\n`;
 }
 
+function collectionMap(local: LibraryModel, remote: LibraryModel): Map<string, Collection> {
+  const collections = new Map<string, Collection>();
+  for (const collection of [...local.collections, ...remote.collections]) collections.set(collection.id, collection);
+  return collections;
+}
+
 export function titleConflicts(local: LibraryModel, remote: LibraryModel): TitleConflict[] {
   const remoteById = new Map(remote.bookmarks.map((bookmark) => [bookmark.id, bookmark]));
+  const collections = collectionMap(local, remote);
   const conflicts: TitleConflict[] = [];
   for (const bookmark of local.bookmarks) {
     const other = remoteById.get(bookmark.id);
-    if (!other || !conflictFields(bookmark, other).includes('title')) continue;
-    conflicts.push({ bookmarkId: bookmark.id, localTitle: bookmark.title, remoteTitle: other.title });
+    if (!other) continue;
+    const fields = conflictFields(bookmark, other, { collections });
+    if (!fields.length) continue;
+    conflicts.push({
+      bookmarkId: bookmark.id,
+      localTitle: bookmark.title,
+      remoteTitle: other.title,
+      fields: [...fields],
+      local: bookmark,
+      remote: other,
+    });
   }
   return conflicts;
 }
@@ -303,11 +330,12 @@ export function titleConflicts(local: LibraryModel, remote: LibraryModel): Title
 export function mergeTitleChoices(
   local: LibraryModel,
   remote: LibraryModel,
-  choices: ReadonlyMap<string, 'local' | 'remote'>,
+  choices: ReadonlyMap<string, ConflictChoice>,
   now: string,
 ): LibraryModel {
   const conflicts = titleConflicts(local, remote);
-  if (conflicts.some((conflict) => !choices.has(conflict.bookmarkId))) throw new Error('未选择要保留的标题');
+  if (conflicts.some((conflict) => !choices.has(conflict.bookmarkId))) throw new Error('未选择要保留的版本');
+  const chosenIds = new Set(conflicts.map((conflict) => conflict.bookmarkId));
   const localById = new Map(local.bookmarks.map((bookmark) => [bookmark.id, bookmark]));
   const remoteById = new Map(remote.bookmarks.map((bookmark) => [bookmark.id, bookmark]));
   const remotePurged = new Set(remote.purged);
@@ -320,9 +348,17 @@ export function mergeTitleChoices(
     }
     const left = localById.get(id);
     const right = remoteById.get(id);
-    if (left && right && conflictFields(left, right).includes('title')) {
-      const chosen = choices.get(id) === 'remote' ? right : left;
-      bookmarks.push({ ...chosen, tags: [...chosen.tags], updatedAt: now, revision: Math.max(left.revision, right.revision) + 1 });
+    if (left && right && chosenIds.has(id)) {
+      const choice = choices.get(id);
+      const chosen = choice?.keep === 'remote' ? right : choice?.keep === 'merged' ? choice.bookmark : left;
+      if (!choice || !chosen || chosen.id !== id) throw new Error('合并需要这条书签');
+      bookmarks.push({
+        ...chosen,
+        id,
+        tags: [...chosen.tags],
+        updatedAt: now,
+        revision: Math.max(left.revision, right.revision, chosen.revision) + 1,
+      });
       continue;
     }
     if (left && right) {

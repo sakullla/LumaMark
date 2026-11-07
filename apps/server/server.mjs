@@ -7,6 +7,7 @@ import { openDataStore, StoreError } from './store.mjs';
 
 const SESSION_SECONDS = 14 * 24 * 60 * 60;
 const indexPath = fileURLToPath(new URL('./public/index.html', import.meta.url));
+const scriptPath = fileURLToPath(new URL('./public/web.js', import.meta.url));
 
 function send(res, status, body, extra = {}) {
   const html = typeof body === 'string';
@@ -96,6 +97,7 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0 }) {
   await store.ready();
   const sessions = new Map();
   const page = await readFile(indexPath, 'utf8');
+  const script = await readFile(scriptPath, 'utf8');
 
   function createSession(account) {
     const token = randomBytes(32).toString('base64url');
@@ -126,6 +128,10 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0 }) {
     const path = url.pathname;
     if (req.method === 'GET' && (path === '/' || path === '/index.html')) {
       send(res, 200, page);
+      return;
+    }
+    if (req.method === 'GET' && path === '/web.js') {
+      send(res, 200, script, { 'Content-Type': 'application/javascript; charset=utf-8' });
       return;
     }
     if (req.method === 'POST' && path === '/api/session') {

@@ -21,6 +21,9 @@
   <p>这是你自己部署的书签服务。账号由部署者在服务器上创建，此页面不能注册。</p>
   <noscript><p>浏览器没有运行页面脚本，因此这里不显示书签库。</p></noscript>
   <div id="root"></div>
-  <script type="module" src="./src/main.ts"></script>
+  <script type="module">
+    import { startWebApp } from './src/main.ts';
+    startWebApp();
+  </script>
 </body>
 </html>
