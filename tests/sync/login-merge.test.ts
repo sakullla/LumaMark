@@ -63,10 +63,12 @@ describe('login merge', () => {
         bookmark('account-only', 'https://account.example/only', { collectionId: 'a-notes', title: 'Account only' }),
         bookmark('account-work', 'https://shared-folder.example/account', { collectionId: 'a-work' }),
         bookmark('same-id', 'https://example.com/account-url', { collectionId: 'a-work', title: 'Account identity' }),
+        bookmark('slash-account', 'https://example.com/slash', { collectionId: 'a-slash' }),
       ],
       collections: [
         folder('a-work', 'Work'),
         folder('a-notes', 'Notes', 'a-work'),
+        folder('a-slash', 'A/B'),
       ],
     };
     const guest: LoginLibrary = {
@@ -74,6 +76,7 @@ describe('login merge', () => {
         bookmark('guest-only', 'https://guest.example/only', { collectionId: 'g-papers', title: 'Guest only', notes: 'from guest' }),
         bookmark('guest-extra', 'https://shared-folder.example/extra', { collectionId: 'g-extra', title: 'Extra' }),
         bookmark('same-id', 'https://example.com/guest-url', { collectionId: 'g-work', title: 'Guest identity', notes: 'guest notes' }),
+        bookmark('slash-guest', 'https://example.com/slash', { collectionId: 'g-child' }),
       ],
       collections: [
         folder('g-read', 'Reading'),
@@ -84,9 +87,6 @@ describe('login merge', () => {
         folder('g-child', 'B', 'g-parent'),
       ],
     };
-    account.bookmarks.push(bookmark('slash-account', 'https://example.com/slash', { collectionId: 'a-slash' }));
-    account.collections.push(folder('a-slash', 'A/B'));
-    guest.bookmarks.push(bookmark('slash-guest', 'https://example.com/slash', { collectionId: 'g-child' }));
 
     expect(sameFolder(account.collections, 'a-work', guest.collections, 'g-work')).toBe(true);
     expect(sameFolder(account.collections, 'a-notes', guest.collections, 'g-papers')).toBe(false);

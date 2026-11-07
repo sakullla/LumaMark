@@ -58,7 +58,7 @@ export function bookmarkMergeKey(bookmark: Pick<Bookmark, 'url' | 'collectionId'
 }
 
 /** An account is empty when it has no bookmark or folder that is still live. */
-export function isEmptyAccount(library: Pick<LoginLibrary, 'bookmarks' | 'collections'>): boolean {
+export function isEmptyAccount(library: LoginLibrary): boolean {
   const liveBookmark = library.bookmarks.some((bookmark) => bookmark && isLiveBookmark(bookmark));
   const liveFolder = library.collections.some((folder) => folder && isLiveFolder(folder));
   return !liveBookmark && !liveFolder;
