@@ -116,11 +116,12 @@ function fakeServer() {
     if (/\/api\/(register|signup|accounts)$/.test(url)) return new Response('{}', { status: 404 });
     if (url.endsWith('/api/session') && method === 'POST') {
       const parsed = JSON.parse(body ?? '{}') as { username?: string; password?: string };
-      const account = parsed.username ? accounts.get(parsed.username) : undefined;
-      if (!account || account.password !== parsed.password) return Response.json({ error: 'unauthorized' }, { status: 401 });
-      const token = `token-${parsed.username}-${seq++}`;
-      sessions.set(token, parsed.username);
-      return Response.json({ username: parsed.username, token });
+      const username = parsed.username;
+      const account = typeof username === 'string' ? accounts.get(username) : undefined;
+      if (typeof username !== 'string' || !account || account.password !== parsed.password) return Response.json({ error: 'unauthorized' }, { status: 401 });
+      const token = `token-${username}-${seq++}`;
+      sessions.set(token, username);
+      return Response.json({ username, token });
     }
     if (url.endsWith('/api/session') && method === 'DELETE') {
       const token = (headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');

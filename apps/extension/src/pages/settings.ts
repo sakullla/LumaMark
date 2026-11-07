@@ -30,7 +30,18 @@ function globalRuntime(): RuntimePort {
   return runtime;
 }
 
-export function mountSettings(root: ParentNode = document, port: RuntimePort = globalRuntime()): void {
+/** Enough of a document for the settings page. A test double can stand in for `document`. */
+export interface SettingsMountRoot {
+  querySelector<T extends Element = Element>(selectors: string): T | null;
+  querySelectorAll<T extends Element = Element>(selectors: string): SettingsNodeList<T>;
+}
+
+export interface SettingsNodeList<T> {
+  forEach(callback: (value: T, index: number) => void): void;
+  [Symbol.iterator](): Iterator<T>;
+}
+
+export function mountSettings(root: SettingsMountRoot = document, port: RuntimePort = globalRuntime()): void {
   const language = detectUiLanguage();
   const text = copyFor(language);
   const syncStatus = root.querySelector<HTMLElement>('#sync-status');

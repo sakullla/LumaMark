@@ -4,7 +4,7 @@ import { settingsDocument } from '../../apps/extension/src/ui/index';
 import { copyFor } from '../../apps/extension/src/ui/copy';
 import { homeSyncPhrase } from '../../apps/extension/src/ui/bar';
 import { popupRuntimeMessage, type RuntimePort } from '../../apps/extension/src/pages/popup';
-import { mountSettings } from '../../apps/extension/src/pages/settings';
+import { mountSettings, type SettingsMountRoot } from '../../apps/extension/src/pages/settings';
 
 describe('account sign-in controls', () => {
   it('offers overwrite, merge, sign-out, and switch, and has no registration', () => {
@@ -82,17 +82,20 @@ class SettingsNode {
   }
 }
 
-function settingsRoot(): { nodes: Map<string, SettingsNode>; querySelector(selector: string): SettingsNode | null; querySelectorAll(): SettingsNode[] } {
+function settingsRoot(): SettingsMountRoot & { nodes: Map<string, SettingsNode> } {
   const nodes = new Map<string, SettingsNode>();
   for (const id of ['account-server', 'account-form', 'account-signed-in', 'account-who', 'account-status', 'account-switch-form', 'account-switch-user', 'account-switch-password']) {
     nodes.set(id, new SettingsNode());
   }
   return {
     nodes,
-    querySelector(selector: string) {
+    querySelector<T extends Element = Element>(selector: string): T | null {
       const match = selector.match(/#([A-Za-z0-9_-]+)/);
-      return match ? nodes.get(match[1]) ?? null : null;
+      const found = match ? nodes.get(match[1]) : undefined;
+      return (found ?? null) as T | null;
     },
-    querySelectorAll() { return []; },
+    querySelectorAll<T extends Element = Element>(): T[] {
+      return [];
+    },
   };
 }
