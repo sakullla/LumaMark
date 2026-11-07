@@ -79,6 +79,12 @@ export function normalizeServerUrl(value: string): string {
   return trimmed;
 }
 
+/** A blank address is missing. Switching then keeps the server the current session already uses. */
+export function switchServerUrl(requested: unknown, current: string | undefined): string {
+  const typed = String(requested ?? '').trim();
+  return typed || String(current ?? '').trim();
+}
+
 /** Bearer client for the account manifest. If-Match is the ETag bytes from GET, quotes included once. */
 export function accountManifestClient(session: Pick<AccountSession, 'serverUrl' | 'token'>, fetchImpl: FetchLike = fetch): WebDavClient {
   const root = normalizeServerUrl(session.serverUrl);
@@ -366,6 +372,11 @@ export class AccountFlow {
   private async logoutNow(): Promise<AccountResult> {
     if (this.active !== 'account' || !this.session) return { ok: true, status: 'signed-out' };
     const session = this.session;
+    const metadata = await this.ports.account.getSyncMetadata();
+    if ((metadata.pendingChanges ?? 0) > 0) {
+      const written = await this.writeBackNow();
+      if (!written.ok) return written;
+    }
     if (await this.ports.rewriteEnabled()) {
       try {
         await this.ports.rewriteBar('guest');
@@ -400,9 +411,10 @@ export class AccountFlow {
     const current = this.session;
     const written = await this.writeBackNow();
     if (!written.ok) return written;
+    const serverUrl = switchServerUrl(input.serverUrl, current.serverUrl);
     let next: AccountSession;
     try {
-      next = await openAccountSession(input, this.ports.fetch);
+      next = await openAccountSession({ ...input, serverUrl }, this.ports.fetch);
     } catch (error) {
       return this.failed(error);
     }

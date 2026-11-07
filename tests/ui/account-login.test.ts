@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { settingsDocument } from '../../apps/extension/src/ui/index';
 import { copyFor } from '../../apps/extension/src/ui/copy';
 import { homeSyncPhrase } from '../../apps/extension/src/ui/bar';
-import { popupRuntimeMessage } from '../../apps/extension/src/pages/popup';
+import { popupRuntimeMessage, type RuntimePort } from '../../apps/extension/src/pages/popup';
+import { mountSettings } from '../../apps/extension/src/pages/settings';
 
 describe('account sign-in controls', () => {
   it('offers overwrite, merge, sign-out, and switch, and has no registration', () => {
@@ -27,6 +28,29 @@ describe('account sign-in controls', () => {
     expect(source).not.toContain('/api/signup');
   });
 
+  it('restores the signed-in server and uses it when the address field is blank', async () => {
+    const sent: Array<{ type: string; payload?: { serverUrl?: string; username?: string } }> = [];
+    const port: RuntimePort = {
+      async sendMessage(message) {
+        sent.push(message as { type: string; payload?: { serverUrl?: string; username?: string } });
+        if (message.type === 'lumamark-account-status') {
+          return { ok: true, loggedIn: true, username: 'alice', serverUrl: 'https://bookmarks.example' };
+        }
+        return { ok: true, items: [], config: {} };
+      },
+    };
+    const root = settingsRoot();
+    mountSettings(root, port);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(root.nodes.get('account-server')?.value).toBe('https://bookmarks.example');
+    root.nodes.get('account-server')!.value = '   ';
+    root.nodes.get('account-switch-user')!.value = 'betty';
+    root.nodes.get('account-switch-password')!.value = 'secret';
+    await root.nodes.get('account-switch-form')!.submit();
+    const switched = sent.find((message) => message.type === 'lumamark-account-switch');
+    expect(switched?.payload).toMatchObject({ serverUrl: 'https://bookmarks.example', username: 'betty' });
+  });
+
   it('does not show the library as synced while a write is still waiting', () => {
     expect(homeSyncPhrase({ configured: true, status: 'idle', pendingChanges: 1 })).toBe('needs-attention');
     expect(homeSyncPhrase({ configured: true, status: 'syncing' })).toBe('needs-attention');
@@ -34,3 +58,41 @@ describe('account sign-in controls', () => {
     expect(homeSyncPhrase({ configured: true, status: 'idle', pendingChanges: 0, lastSyncAt: '2024-01-01T00:00:00.000Z' } as never)).toBe('aligned');
   });
 });
+
+class SettingsNode {
+  value = '';
+  textContent = '';
+  hidden = false;
+  disabled = false;
+  checked = false;
+  dataset: Record<string, string> = {};
+  private listeners = new Map<string, Array<(event: { preventDefault(): void; currentTarget: SettingsNode }) => unknown>>();
+
+  addEventListener(type: string, listener: (event: { preventDefault(): void; currentTarget: SettingsNode }) => unknown): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(listener);
+    this.listeners.set(type, list);
+  }
+
+  submit(): Promise<unknown> {
+    return Promise.all((this.listeners.get('submit') ?? []).map((listener) => listener({
+      preventDefault() {},
+      currentTarget: this,
+    })));
+  }
+}
+
+function settingsRoot(): { nodes: Map<string, SettingsNode>; querySelector(selector: string): SettingsNode | null; querySelectorAll(): SettingsNode[] } {
+  const nodes = new Map<string, SettingsNode>();
+  for (const id of ['account-server', 'account-form', 'account-signed-in', 'account-who', 'account-status', 'account-switch-form', 'account-switch-user', 'account-switch-password']) {
+    nodes.set(id, new SettingsNode());
+  }
+  return {
+    nodes,
+    querySelector(selector: string) {
+      const match = selector.match(/#([A-Za-z0-9_-]+)/);
+      return match ? nodes.get(match[1]) ?? null : null;
+    },
+    querySelectorAll() { return []; },
+  };
+}

@@ -517,6 +517,69 @@ describe('signing in, out, and switching', () => {
     expect(bar).toEqual(['Alpha']);
   });
 
+  it('reuses the signed-in server when a switch leaves the address blank', async () => {
+    const { account, server, flow } = harness({ rewrite: true });
+    server.create('alice', 'secret', manifest([bookmark('alpha', 'Alpha', 'https://alpha.example/')]));
+    server.create('betty', 'secret', manifest([bookmark('beta', 'Beta', 'https://beta.example/')]));
+    await flow.login({ serverUrl: SERVER, username: 'alice', password: 'secret' });
+    await flow.choose('overwrite');
+    expect(await flow.switchAccount({ serverUrl: '   ', username: 'betty', password: 'secret' })).toMatchObject({ ok: true, username: 'betty' });
+    expect(flow.session?.serverUrl).toBe(SERVER);
+    expect(await liveTitles(account)).toEqual(['Beta']);
+    expect(server.accounts.get('alice')?.manifest.bookmarks?.map((item) => item.id)).toEqual(['alpha']);
+    expect(server.accounts.get('betty')?.manifest.bookmarks?.map((item) => item.id)).toEqual(['beta']);
+  });
+
+  it('writes an unfinished account edit back before signing out', async () => {
+    const { account, server, flow, bar } = harness({ rewrite: true });
+    server.create('alice', 'secret', manifest([bookmark('alpha', 'Alpha', 'https://alpha.example/')]));
+    await flow.login({ serverUrl: SERVER, username: 'alice', password: 'secret' });
+    await flow.choose('overwrite');
+    const current = (await account.findById('alpha'))!;
+    await account.put({ ...current, title: 'Alpha edited', updatedAt: '2024-07-01T00:00:00.000Z', revision: 3 });
+    await account.setSyncMetadata({ ...(await account.getSyncMetadata()), pendingChanges: 1, status: 'idle' });
+    expect(await flow.logout()).toMatchObject({ ok: true, status: 'signed-out' });
+    expect(flow.active).toBe('guest');
+    expect(flow.session).toBeUndefined();
+    expect(server.accounts.get('alice')?.manifest.bookmarks?.find((item) => item.id === 'alpha')?.title).toBe('Alpha edited');
+    expect(await liveTitles(account)).toEqual([]);
+    expect(bar).toEqual([]);
+  });
+
+  it('stays on the account when sign-out cannot write the unfinished edit back', async () => {
+    const { account, server, flow, bar, rewrites, saved } = harness({ rewrite: true });
+    server.create('alice', 'secret', manifest([bookmark('alpha', 'Alpha', 'https://alpha.example/')]));
+    await flow.login({ serverUrl: SERVER, username: 'alice', password: 'secret' });
+    await flow.choose('overwrite');
+    const current = (await account.findById('alpha'))!;
+    await account.put({ ...current, title: 'Alpha edited', updatedAt: '2024-07-01T00:00:00.000Z', revision: 3 });
+    await account.setSyncMetadata({ ...(await account.getSyncMetadata()), pendingChanges: 1, status: 'idle' });
+    const token = saved.session?.token;
+    server.setDown(true);
+    expect((await flow.logout()).ok).toBe(false);
+    expect(flow.active).toBe('account');
+    expect(flow.session?.username).toBe('alice');
+    expect(flow.session?.token).toBe(token);
+    expect(await liveTitles(account)).toEqual(['Alpha edited']);
+    expect(server.accounts.get('alice')?.manifest.bookmarks?.find((item) => item.id === 'alpha')?.title).toBe('Alpha');
+    expect(server.sessions.has(token ?? '')).toBe(true);
+    expect(rewrites).toEqual(['account']);
+    expect(bar).toEqual(['Alpha']);
+  });
+
+  it('signs out without a write when nothing is waiting, even if the server is down', async () => {
+    const { server, flow } = harness({ rewrite: true });
+    server.create('alice', 'secret', manifest([bookmark('alpha', 'Alpha', 'https://alpha.example/')]));
+    await flow.login({ serverUrl: SERVER, username: 'alice', password: 'secret' });
+    await flow.choose('overwrite');
+    const puts = server.calls.filter((call) => call.method === 'PUT').length;
+    server.setDown(true);
+    expect(await flow.logout()).toMatchObject({ ok: true, status: 'signed-out' });
+    expect(flow.active).toBe('guest');
+    expect(server.calls.filter((call) => call.method === 'PUT').length).toBe(puts);
+    expect(server.accounts.get('alice')?.manifest.bookmarks?.find((item) => item.id === 'alpha')?.title).toBe('Alpha');
+  });
+
   it('keeps a local edit unsynced while the server cannot be reached, then publishes the chosen title', async () => {
     const { account, server, flow } = harness();
     const original = bookmark('same', 'Original', 'https://same.example/');

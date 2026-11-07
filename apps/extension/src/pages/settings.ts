@@ -126,8 +126,12 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   const accountWho = root.querySelector<HTMLElement>('#account-who');
   const accountChoice = root.querySelector<HTMLDialogElement>('#account-choice');
   let accountLoggedIn = false;
-  const paintAccount = (account?: { loggedIn?: boolean; username?: string }) => {
+  let accountServerUrl = '';
+  const paintAccount = (account?: { loggedIn?: boolean; username?: string; serverUrl?: string }) => {
     accountLoggedIn = Boolean(account?.loggedIn);
+    accountServerUrl = accountLoggedIn ? String(account?.serverUrl ?? '').trim() : '';
+    const serverField = root.querySelector<HTMLInputElement>('#account-server');
+    if (serverField) serverField.value = accountServerUrl;
     if (accountForm) accountForm.hidden = accountLoggedIn;
     if (accountSignedIn) accountSignedIn.hidden = !accountLoggedIn;
     if (accountWho) accountWho.textContent = accountLoggedIn ? fill(text.accountSignedIn, { name: account?.username ?? '' }) : '';
@@ -205,13 +209,13 @@ export function mountSettings(root: ParentNode = document, port: RuntimePort = g
   });
   root.querySelector<HTMLFormElement>('#account-switch-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget as HTMLFormElement);
-    const server = root.querySelector<HTMLInputElement>('#account-server')?.value ?? '';
+    const typed = root.querySelector<HTMLInputElement>('#account-server')?.value ?? '';
+    const server = typed.trim() || accountServerUrl;
     try {
       const response = await sendRuntime(port, 'account-switch', {
         serverUrl: server,
-        username: data.get('account-switch-user'),
-        password: data.get('account-switch-password'),
+        username: root.querySelector<HTMLInputElement>('#account-switch-user')?.value ?? '',
+        password: root.querySelector<HTMLInputElement>('#account-switch-password')?.value ?? '',
       });
       const passwordField = root.querySelector<HTMLInputElement>('#account-switch-password');
       if (passwordField) passwordField.value = '';

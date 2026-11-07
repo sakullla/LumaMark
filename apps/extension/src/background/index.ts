@@ -43,6 +43,7 @@ import {
   markUnsynced,
   openAccountLibrary,
   replaceBrowserBookmarks,
+  switchServerUrl,
   type AccountLibrary,
   type AccountSession,
 } from './account';
@@ -940,7 +941,7 @@ export function startBackground(
       nativeSuspended += 1;
       try {
         return await flow.switchAccount({
-          serverUrl: String(payload.serverUrl ?? flow.session?.serverUrl ?? ''),
+          serverUrl: switchServerUrl(payload.serverUrl, flow.session?.serverUrl),
           username: String(payload.username ?? ''),
           password: String(payload.password ?? ''),
         });
