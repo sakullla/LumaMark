@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>LumaMark</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; line-height: 1.5; padding: 0 1rem; }
+    form, section { display: grid; gap: 0.75rem; }
+    [hidden] { display: none !important; }
+    label { display: grid; gap: 0.25rem; }
+    input, button { font: inherit; padding: 0.45rem 0.6rem; }
+    button { width: fit-content; }
+    #notice { min-height: 1.5rem; }
+    ul { padding-left: 1.2rem; }
+    li { margin: 0.35rem 0; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>LumaMark</h1>
+  <p>这是你自己部署的书签服务。账号由部署者在服务器上创建，此页面不能注册。</p>
+  <noscript><p>浏览器没有运行页面脚本，因此这里不显示书签库。</p></noscript>
+  <p id="notice" role="status"></p>
+  <form id="login">
+    <label>用户名 <input name="username" autocomplete="username" required></label>
+    <label>密码 <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">登录</button>
+  </form>
+  <section id="library" hidden>
+    <h2>书签</h2>
+    <p id="library-status" role="status"></p>
+    <ul id="bookmarks"></ul>
+    <button id="logout" type="button">退出</button>
+  </section>
+  <script>
+    const loginForm = document.querySelector('#login');
+    const notice = document.querySelector('#notice');
+    const library = document.querySelector('#library');
+    const libraryStatus = document.querySelector('#library-status');
+    const list = document.querySelector('#bookmarks');
+
+    function showLogin(message) {
+      loginForm.hidden = false;
+      library.hidden = true;
+      list.replaceChildren();
+      libraryStatus.textContent = '';
+      notice.textContent = message || '';
+    }
+
+    function showOffline() {
+      showLogin('连不上服务，没有显示书签库。');
+    }
+
+    function showLibrary(bookmarks) {
+      loginForm.hidden = true;
+      library.hidden = false;
+      notice.textContent = '';
+      list.replaceChildren();
+      const visible = bookmarks.filter((item) => item && !item.deletedAt && !item.purgedAt);
+      if (!visible.length) {
+        libraryStatus.textContent = '这个账号还没有书签。';
+        return;
+      }
+      libraryStatus.textContent = '';
+      for (const item of visible) {
+        const row = document.createElement('li');
+        const title = document.createElement('strong');
+        title.textContent = item.title || item.url || '未命名书签';
+        row.append(title);
+        if (item.url) {
+          row.append(document.createTextNode(' '));
+          const url = document.createElement('span');
+          url.textContent = item.url;
+          row.append(url);
+        }
+        list.append(row);
+      }
+    }
+
+    async function loadManifest() {
+      let response;
+      try {
+        response = await fetch('/api/manifest', { cache: 'no-store', credentials: 'same-origin' });
+      } catch {
+        showOffline();
+        return;
+      }
+      if (response.status === 401) {
+        showLogin('没有进入账号，没有显示书签库。');
+        return;
+      }
+      if (!response.ok) {
+        showOffline();
+        return;
+      }
+      let manifest;
+      try {
+        manifest = await response.json();
+      } catch {
+        showOffline();
+        return;
+      }
+      if (!manifest || !Array.isArray(manifest.bookmarks)) {
+        showOffline();
+        return;
+      }
+      showLibrary(manifest.bookmarks);
+    }
+
+    loginForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = new FormData(loginForm);
+      notice.textContent = '';
+      let response;
+      try {
+        response = await fetch('/api/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          body: JSON.stringify({
+            username: String(data.get('username') || ''),
+            password: String(data.get('password') || ''),
+          }),
+        });
+      } catch {
+        showOffline();
+        return;
+      }
+      if (response.status === 401) {
+        const password = loginForm.elements.password;
+        if (password) password.value = '';
+        showLogin('登录信息不正确，没有进入账号。');
+        return;
+      }
+      if (!response.ok) {
+        showOffline();
+        return;
+      }
+      await loadManifest();
+    });
+
+    document.querySelector('#logout').addEventListener('click', async () => {
+      try {
+        await fetch('/api/session', { method: 'DELETE', credentials: 'same-origin' });
+      } catch {
+        showOffline();
+        return;
+      }
+      showLogin('');
+    });
+
+    fetch('/api/session', { cache: 'no-store', credentials: 'same-origin' })
+      .then((response) => {
+        if (response.ok) return loadManifest();
+        if (response.status !== 401) showOffline();
+        return undefined;
+      })
+      .catch(() => showOffline());
+  </script>
+</body>
+</html>

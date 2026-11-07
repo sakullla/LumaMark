@@ -37,10 +37,86 @@ Safari 的身份由原生工程管理，Chrome 的公钥和 Firefox 的 ID 不�
 
 Safari 构建会去除 Chrome 专属 `key`、`bookmarks` 和 `favicon` 权限。跨平台构建检查不能代替 macOS 上的签名、安装和升级验证。
 
+## 自己部署的服务
+
+Docker 镜像里只有一个 Node 进程。它提供登录、书签清单接口，以及一个可以在浏览器里打开的页面。账号、口令哈希和每个账号的一份 `lumamark-sync` 清单都写在镜像外的数据目录里，不另外启动数据库。网页和扩展都不能注册；只有下面的命令能创建账号。
+
+在仓库根目录构建并运行。把数据目录挂到容器内的 `/data`：
+
+```sh
+docker build -t lumamark .
+docker run -d --name lumamark -p 8787:8787 -v lumamark-data:/data -e LUMAMARK_DATA=/data lumamark
+```
+
+`lumamark-data` 是 Docker 卷。要改用本机目录，把 `-v lumamark-data:/data` 换成 `-v /你的目录:/data`。重启容器或用同一目录重新创建容器后，已经创建的账号和其中的书签都还在。
+
+浏览器打开 `http://127.0.0.1:8787/`。这个页面可以登录，并列出该账号已有的书签。连不上服务时，页面不会把这种情况显示成一本空的书签库。这里不能注册，也不是完整的书签库；完整书签库会由后续网页提供。扩展仍然单独安装，不在这个镜像里。
+
+创建账号时在容器里执行。密码放在环境变量里，避免写进命令参数：
+
+```sh
+docker exec -e LUMAMARK_PASSWORD=你的密码 lumamark node apps/server/cli.mjs create-account --username alice
+```
+
+也可以直接对已经挂载出来的数据目录执行：
+
+```sh
+node apps/server/cli.mjs create-account --data /你的目录 --username alice --password 你的密码
+```
+
+用户名去掉首尾空白后按原文匹配，长度 1 到 64。未执行该命令时，任何登录都不会建立会话。密码错误时同样返回 401，响应里没有 token，也没有会话 cookie。重复创建同一个用户名会失败，原来的账号保持不变。
+
+登录、读取和写入都只作用于这次会话对应的账号。账号甲的会话读不到账号乙的清单，写入也只会改自己的那一份。
+
+登录：
+
+```http
+POST /api/session
+Content-Type: application/json
+
+{"username":"alice","password":"你的密码"}
+```
+
+成功时状态码 200，正文是 `{"username":"alice","token":"..."}`，并设置 HttpOnly cookie `lumamark_session`。随后的请求带 `Authorization: Bearer <token>`，或带这个 cookie。失败时状态码 401，正文是 `{"error":"unauthorized"}`。退出是 `DELETE /api/session`，状态码 204。
+
+读取清单：
+
+```http
+GET /api/manifest
+Authorization: Bearer <token>
+```
+
+成功时正文是 `format` 为 `lumamark-sync` 的清单，响应头 `ETag` 是这份内容的版本。服务只保存清单里的书签、文件夹和已清空 id，不保存搜索地址、主题或网页正文。
+
+写入必须带上一次读到的 `ETag`：
+
+```http
+PUT /api/manifest
+Authorization: Bearer <token>
+Content-Type: application/json
+If-Match: <GET 响应头 ETag 的原文>
+
+{清单 JSON}
+```
+
+`ETag` 的原文形如 `"<64 位十六进制>"`，写回 `If-Match` 时保持这一层引号，不要再套一层。成功时状态码 200，响应头和正文里的 `etag` 都是新版本。没有 `If-Match` 时状态码是 428，版本对不上或者 `If-Match` 为 `*` 时状态码是 412。这两种情况下，原来的清单都不变。
+
+没有 `POST /api/register`、`/api/signup` 或 `/api/accounts`。这些路径返回 404，不会创建账号。
+
+未登录时，扩展里的书签仍按原有方式使用 WebDAV。登录后的账号清单只通过上面的接口读写，不走 WebDAV。
+
+检查镜像能否在重启后保留书签，可以运行：
+
+```sh
+node scripts/verify-server-docker.mjs
+```
+
+它会构建镜像、挂载数据目录、创建账号、写入一条书签、重启容器并确认该书签仍在，然后删除这次使用的容器。本机没有可用的 Docker 时，脚本会跳过并以成功状态退出。`npm test` 不运行这个脚本，也不需要 Docker。
+
 ## 数据与同步
 
 首次运行时，LumaMark 读取浏览器现有的书签（书签栏和其他书签），之后双向保持一致：在浏览器里增删改书签会写进 LumaMark，WebDAV 同步带来的改动也会写回浏览器书签。第二台浏览器加入时，相同文件夹中网址相同的书签会合并成一条，不会出现重复。核心书签先写入本地 IndexedDB。离线时书签栏、菜单、本地搜索和打开已保存的链接仍然可用。搜索地址只保存在这台浏览器，不写入 WebDAV 同步文件。只有用户填入可用的 WebDAV 地址后才会同步：保存连接时立即检查，连通后自动同步默认开启，并可以关掉；手动同步仍然可用。凭据失败、远端拒绝写入、空间不足或地址不可达会暂停自动同步，已有本地书签保持不变。卸载前请在设置中导出备份。
 
 ## 首发范围
 
-首发支持桌面 Chrome、Edge、Firefox 和 Safari macOS。移动 Safari、团队协作、社交分享、S3/自有服务同步、浏览器厂商账号同步以及网页全文/截图/PDF 归档不在首发范围。
+首发支持桌面 Chrome、Edge、Firefox 和 Safari macOS，以及上面的自行部署服务。移动 Safari、团队协作、社交分享、S3、浏览器厂商账号同步以及网页全文、截图或 PDF 归档不在范围内。

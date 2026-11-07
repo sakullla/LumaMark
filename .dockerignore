@@ -1,0 +1,15 @@
+.git
+.github
+node_modules
+dist
+data
+coverage
+**/.DS_Store
+docs
+tests
+scripts
+store
+apps/extension
+apps/web
+packages
+*.md
