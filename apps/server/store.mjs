@@ -327,6 +327,57 @@ export function openDataStore(dataDir) {
       });
       return { id: account.id, username: account.username };
     },
+    /** Creates the account, or replaces its password when it already exists. */
+    async ensureAccount(username, password) {
+      const name = normalizeUsername(username);
+      const secret = normalizePassword(password);
+      if (!name || secret == null) throw new StoreError(400, 'invalid_account');
+      const passwordRecord = await hashPassword(secret);
+      return withLock(async () => {
+        const accounts = await readAccounts();
+        const existing = accounts.find((item) => item && item.username === name);
+        if (existing) {
+          existing.password = passwordRecord;
+          await writeAccounts(accounts);
+          return { id: existing.id, username: existing.username, created: false };
+        }
+        const account = { id: randomUUID(), username: name, password: passwordRecord, createdAt: new Date().toISOString() };
+        await atomicWrite(manifestPath(account.id), canonical(emptyManifest()));
+        accounts.push(account);
+        await writeAccounts(accounts);
+        return { id: account.id, username: account.username, created: true };
+      });
+    },
+    async listAccounts() {
+      const accounts = await withLock(() => readAccounts());
+      return accounts.filter(Boolean).map((item) => ({ id: item.id, username: item.username, createdAt: item.createdAt ?? null }));
+    },
+    async setPassword(username, password) {
+      const name = normalizeUsername(username);
+      const secret = normalizePassword(password);
+      if (!name || secret == null) throw new StoreError(400, 'invalid_account');
+      const passwordRecord = await hashPassword(secret);
+      return withLock(async () => {
+        const accounts = await readAccounts();
+        const account = accounts.find((item) => item && item.username === name);
+        if (!account) throw new StoreError(404, 'account_missing');
+        account.password = passwordRecord;
+        await writeAccounts(accounts);
+        return { id: account.id, username: account.username };
+      });
+    },
+    async deleteAccount(username) {
+      const name = normalizeUsername(username);
+      if (!name) throw new StoreError(400, 'invalid_account');
+      return withLock(async () => {
+        const accounts = await readAccounts();
+        const account = accounts.find((item) => item && item.username === name);
+        if (!account) throw new StoreError(404, 'account_missing');
+        await writeAccounts(accounts.filter((item) => item !== account));
+        await rm(manifestPath(account.id), { force: true });
+        return { id: account.id, username: account.username };
+      });
+    },
     async authenticate(username, password) {
       const name = normalizeUsername(username);
       const secret = normalizePassword(password);

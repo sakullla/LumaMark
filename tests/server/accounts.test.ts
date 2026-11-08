@@ -142,6 +142,54 @@ describe('account server', () => {
     expect((await login(server.url, 'intruder', 'intruder-pass')).response.status).toBe(401);
   }, 30000);
 
+  it('lets only the environment-provided admin manage accounts', async () => {
+    const dataDir = await makeDir();
+    const plain = await startServer(dataDir);
+    expect((await fetch(`${plain.url}/api/admin/accounts`)).status).toBe(404);
+    await stopProcess(plain.child);
+
+    const server = await startServer(dataDir, { LUMAMARK_ADMIN_USERNAME: 'root', LUMAMARK_ADMIN_PASSWORD: 'root-password' });
+    const admin = await login(server.url, 'root', 'root-password');
+    expect(admin.response.status).toBe(200);
+    expect((admin.body as LoginBody & { admin?: boolean }).admin).toBe(true);
+    const auth = { Authorization: `Bearer ${admin.body.token}`, 'Content-Type': 'application/json' };
+    expect((await fetch(`${server.url}/api/admin/accounts`)).status).toBe(401);
+
+    const weak = await fetch(`${server.url}/api/admin/accounts`, { method: 'POST', headers: auth, body: JSON.stringify({ username: 'ada', password: 'short' }) });
+    expect(weak.status).toBe(400);
+    const created = await fetch(`${server.url}/api/admin/accounts`, { method: 'POST', headers: auth, body: JSON.stringify({ username: 'ada', password: 'ada-password' }) });
+    expect(created.status).toBe(201);
+    const again = await fetch(`${server.url}/api/admin/accounts`, { method: 'POST', headers: auth, body: JSON.stringify({ username: 'ada', password: 'ada-password' }) });
+    expect(again.status).toBe(409);
+    const listed = await (await fetch(`${server.url}/api/admin/accounts`, { headers: auth })).json() as { accounts: { username: string; admin: boolean }[] };
+    expect(listed.accounts.map((item) => [item.username, item.admin])).toEqual([['root', true], ['ada', false]]);
+    expect(JSON.stringify(listed)).not.toContain('scrypt');
+
+    const ada = await login(server.url, 'ada', 'ada-password');
+    expect(ada.response.status).toBe(200);
+    expect((ada.body as LoginBody & { admin?: boolean }).admin).toBe(false);
+    const adaAuth = { Authorization: `Bearer ${ada.body.token}`, 'Content-Type': 'application/json' };
+    expect((await fetch(`${server.url}/api/admin/accounts`, { headers: adaAuth })).status).toBe(403);
+    expect((await fetch(`${server.url}/api/admin/accounts`, { method: 'POST', headers: adaAuth, body: JSON.stringify({ username: 'eve', password: 'eve-password' }) })).status).toBe(403);
+    expect((await login(server.url, 'eve', 'eve-password')).response.status).toBe(401);
+
+    const reset = await fetch(`${server.url}/api/admin/accounts/ada/password`, { method: 'PUT', headers: auth, body: JSON.stringify({ password: 'ada-new-password' }) });
+    expect(reset.status).toBe(204);
+    expect((await getManifest(server.url, ada.body.token ?? '')).response.status).toBe(401);
+    expect((await login(server.url, 'ada', 'ada-password')).response.status).toBe(401);
+    expect((await login(server.url, 'ada', 'ada-new-password')).response.status).toBe(200);
+
+    expect((await fetch(`${server.url}/api/admin/accounts/root`, { method: 'DELETE', headers: auth })).status).toBe(400);
+    expect((await fetch(`${server.url}/api/admin/accounts/ada`, { method: 'DELETE', headers: auth })).status).toBe(204);
+    expect((await login(server.url, 'ada', 'ada-new-password')).response.status).toBe(401);
+    expect((await fetch(`${server.url}/api/admin/accounts/ada`, { method: 'DELETE', headers: auth })).status).toBe(404);
+
+    await stopProcess(server.child);
+    const rotated = await startServer(dataDir, { LUMAMARK_ADMIN_USERNAME: 'root', LUMAMARK_ADMIN_PASSWORD: 'rotated-password' });
+    expect((await login(rotated.url, 'root', 'root-password')).response.status).toBe(401);
+    expect((await login(rotated.url, 'root', 'rotated-password')).response.status).toBe(200);
+  }, 30000);
+
   it('rejects a manifest write that does not name the current etag', async () => {
     const dataDir = await makeDir();
     await createAccount(dataDir, 'ada', 'correct-horse');
@@ -262,10 +310,11 @@ async function createAccount(dataDir: string, username: string, password: string
   if (result.code !== 0) throw new Error(result.stderr || result.stdout || 'create-account failed');
 }
 
-async function startServer(dataDir: string) {
+async function startServer(dataDir: string, extraEnv: NodeJS.ProcessEnv = {}) {
+  const { LUMAMARK_ADMIN_USERNAME: _user, LUMAMARK_ADMIN_PASSWORD: _password, ...baseEnv } = process.env;
   const child = spawn(process.execPath, [serverPath], {
     cwd: root,
-    env: { ...process.env, LUMAMARK_DATA: dataDir, HOST: '127.0.0.1', PORT: '0' },
+    env: { ...baseEnv, LUMAMARK_DATA: dataDir, HOST: '127.0.0.1', PORT: '0', ...extraEnv },
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });

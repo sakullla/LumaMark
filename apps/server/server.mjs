@@ -92,9 +92,21 @@ function bearerToken(req) {
   return match ? match[1] : undefined;
 }
 
-export async function startServer({ dataDir, host = '127.0.0.1', port = 0 }) {
+const MIN_ACCOUNT_PASSWORD = 8;
+
+function adminFromEnv(env) {
+  const username = (env.LUMAMARK_ADMIN_USERNAME ?? '').trim();
+  const password = env.LUMAMARK_ADMIN_PASSWORD ?? '';
+  if (!username && !password) return undefined;
+  if (!username || !password) throw new Error('LUMAMARK_ADMIN_USERNAME 和 LUMAMARK_ADMIN_PASSWORD 需要同时设置');
+  if (password.length < MIN_ACCOUNT_PASSWORD) throw new Error(`LUMAMARK_ADMIN_PASSWORD 至少 ${MIN_ACCOUNT_PASSWORD} 个字符`);
+  return { username, password };
+}
+
+export async function startServer({ dataDir, host = '127.0.0.1', port = 0, admin }) {
   const store = openDataStore(dataDir);
   await store.ready();
+  const adminName = admin ? (await store.ensureAccount(admin.username, admin.password)).username : undefined;
   const sessions = new Map();
   const page = await readFile(indexPath, 'utf8');
   const script = await readFile(scriptPath, 'utf8');
@@ -103,6 +115,81 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0 }) {
     const token = randomBytes(32).toString('base64url');
     sessions.set(token, { accountId: account.id, username: account.username, expiresAt: Date.now() + SESSION_SECONDS * 1000 });
     return token;
+  }
+
+  function isAdmin(session) {
+    return Boolean(adminName && session && session.username === adminName);
+  }
+
+  function dropSessionsOf(accountId, keepToken) {
+    for (const [token, session] of sessions) {
+      if (session.accountId === accountId && token !== keepToken) sessions.delete(token);
+    }
+  }
+
+  function accountPassword(body) {
+    const password = body && typeof body === 'object' ? body.password : undefined;
+    if (typeof password !== 'string' || password.length < MIN_ACCOUNT_PASSWORD) throw new StoreError(400, 'weak_password');
+    return password;
+  }
+
+  async function handleAdmin(req, res, path) {
+    const session = currentSession(req);
+    if (!session) {
+      send(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    if (!isAdmin(session)) {
+      if (req.method === 'POST' || req.method === 'PUT') await readBody(req);
+      send(res, 403, { error: 'forbidden' });
+      return;
+    }
+    if (path === '/api/admin/accounts') {
+      if (req.method === 'GET') {
+        const accounts = await store.listAccounts();
+        send(res, 200, { accounts: accounts.map((item) => ({ username: item.username, createdAt: item.createdAt, admin: item.username === adminName })) });
+        return;
+      }
+      if (req.method === 'POST') {
+        const body = parseJson(await readBody(req));
+        const password = accountPassword(body);
+        const created = await store.createAccount(body.username, password);
+        send(res, 201, { username: created.username });
+        return;
+      }
+      send(res, 405, { error: 'method_not_allowed' });
+      return;
+    }
+    const match = /^\/api\/admin\/accounts\/([^/]+)(\/password)?$/.exec(path);
+    if (!match) {
+      send(res, 404, { error: 'not_found' });
+      return;
+    }
+    let username;
+    try {
+      username = decodeURIComponent(match[1]);
+    } catch {
+      send(res, 400, { error: 'invalid_account' });
+      return;
+    }
+    if (match[2] && req.method === 'PUT') {
+      const password = accountPassword(parseJson(await readBody(req)));
+      const changed = await store.setPassword(username, password);
+      dropSessionsOf(changed.id, session.token);
+      sendEmpty(res, 204);
+      return;
+    }
+    if (!match[2] && req.method === 'DELETE') {
+      if (username === adminName) {
+        send(res, 400, { error: 'cannot_delete_admin' });
+        return;
+      }
+      const removed = await store.deleteAccount(username);
+      dropSessionsOf(removed.id);
+      sendEmpty(res, 204);
+      return;
+    }
+    send(res, 405, { error: 'method_not_allowed' });
   }
 
   function currentSession(req) {
@@ -144,7 +231,7 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0 }) {
         return;
       }
       const token = createSession(account);
-      send(res, 200, { username: account.username, token }, { 'Set-Cookie': sessionCookie(token, SESSION_SECONDS) });
+      send(res, 200, { username: account.username, token, admin: account.username === adminName }, { 'Set-Cookie': sessionCookie(token, SESSION_SECONDS) });
       return;
     }
     if (req.method === 'GET' && path === '/api/session') {
@@ -153,7 +240,11 @@ export async function startServer({ dataDir, host = '127.0.0.1', port = 0 }) {
         send(res, 401, { error: 'unauthorized' });
         return;
       }
-      send(res, 200, { username: session.username });
+      send(res, 200, { username: session.username, admin: isAdmin(session) });
+      return;
+    }
+    if (adminName && (path === '/api/admin/accounts' || path.startsWith('/api/admin/accounts/'))) {
+      await handleAdmin(req, res, path);
       return;
     }
     if (req.method === 'DELETE' && path === '/api/session') {
@@ -229,8 +320,16 @@ if (invoked) {
     console.error('PORT 无效');
     process.exit(1);
   }
-  const running = await startServer({ dataDir, host, port });
+  let admin;
+  try {
+    admin = adminFromEnv(process.env);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+  const running = await startServer({ dataDir, host, port, admin });
   console.log(`listening ${running.url}`);
+  console.log(admin ? `admin ${admin.username}` : 'admin not configured: set LUMAMARK_ADMIN_USERNAME and LUMAMARK_ADMIN_PASSWORD to manage accounts on the web page');
   const shutdown = () => {
     running.close().then(() => process.exit(0), () => process.exit(1));
   };

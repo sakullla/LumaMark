@@ -4,22 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
   <title>LumaMark</title>
+  <script>
+    try {
+      var t = localStorage.getItem('lumamark-theme');
+      document.documentElement.dataset.theme = t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+      document.documentElement.dataset.accent = localStorage.getItem('lumamark-accent') || 'iris';
+    } catch (e) {}
+  </script>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 48rem; line-height: 1.5; padding: 0 1rem; }
-    form, section { display: grid; gap: 0.75rem; }
-    label { display: grid; gap: 0.25rem; }
-    input, textarea, button, select { font: inherit; padding: 0.45rem 0.6rem; }
-    button { width: fit-content; }
-    li, article { display: grid; gap: 0.35rem; margin: 1rem 0; }
-    #notice { min-height: 1.5rem; }
+    html { background: #f6f6f8; color: #18181b; }
+    html[data-theme="dark"] { background: #0f0f12; color: #ececf1; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.5; }
   </style>
 </head>
 <body>
-  <h1>LumaMark</h1>
-  <p>这是你自己部署的书签服务。账号由部署者在服务器上创建，此页面不能注册。</p>
-  <noscript><p>浏览器没有运行页面脚本，因此这里不显示书签库。</p></noscript>
+  <noscript><p>浏览器没有运行页面脚本，因此这里不显示书签库。账号由管理员创建，此页面不能注册。</p></noscript>
   <div id="root"></div>
   <script type="module">
     import { startWebApp } from './src/main.ts';
