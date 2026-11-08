@@ -41,7 +41,24 @@ Safari 构建会去除 Chrome 专属 `key`、`bookmarks` 和 `favicon` 权限。
 
 Docker 镜像里只有一个 Node 进程。它提供登录、书签清单接口，以及一个可以在浏览器里打开的页面。账号、口令哈希和每个账号的一份 `lumamark-sync` 清单都写在镜像外的数据目录里，不另外启动数据库。网页和扩展都不能自行注册：管理员账号由环境变量提供，其他账号由管理员在网页上创建。
 
-在仓库根目录构建并运行。把数据目录挂到容器内的 `/data`，并用环境变量给出管理员的用户名和密码（密码至少 8 个字符）：
+部署时把数据目录挂到容器内的 `/data`，并用环境变量给出管理员的用户名和密码（密码至少 8 个字符）。有三种方式。
+
+用仓库里的 `docker-compose.yml`（先把 `.env.example` 复制为 `.env` 并设置管理员账号）：
+
+```sh
+cp .env.example .env
+docker compose up -d
+```
+
+或拉取 GitHub Container Registry 上的镜像直接运行：
+
+```sh
+docker pull ghcr.io/sakullla/lumamark:latest
+docker run -d --name lumamark -p 8787:8787 -v lumamark-data:/data -e LUMAMARK_DATA=/data \
+  -e LUMAMARK_ADMIN_USERNAME=admin -e LUMAMARK_ADMIN_PASSWORD=你的管理员密码 ghcr.io/sakullla/lumamark:latest
+```
+
+或在仓库根目录自行构建：
 
 ```sh
 docker build -t lumamark .

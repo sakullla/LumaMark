@@ -1,0 +1,27 @@
+services:
+  lumamark:
+    # 固定版本可改为 ghcr.io/sakullla/lumamark:0.1.11
+    image: ghcr.io/sakullla/lumamark:latest
+    # 本地没有镜像时 compose 会自动构建；也可以显式执行 docker compose up -d --build
+    build: .
+    container_name: lumamark
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      LUMAMARK_DATA: /data
+      # 管理员账号由 .env 提供（cp .env.example .env 后编辑）；
+      # 两个变量都不设时服务照常运行，改用 CLI 创建账号。
+      LUMAMARK_ADMIN_USERNAME: ${LUMAMARK_ADMIN_USERNAME:-}
+      LUMAMARK_ADMIN_PASSWORD: ${LUMAMARK_ADMIN_PASSWORD:-}
+    volumes:
+      - lumamark-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8787/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  lumamark-data:

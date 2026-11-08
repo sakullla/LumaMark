@@ -2,3 +2,4 @@ docs/requirements/
 docs/sakullla-workflow/
 node_modules/
 dist/
+.env
