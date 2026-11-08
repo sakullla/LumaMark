@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LumaMark",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwuEbnHc4UHR56KYliqcxAoOcqX5oujgawKuCPTSwnBz7VuxpeFxjxcASlp7XFQ+XKm1al5pBkakeYlMJICZ1sJod6seGmnwsdqdPJnL3Sn9oC6UA1SVoC9by4aHqyRFQhkvd7wF+3QgIQJahFGZTCU/68uYB0LfWnDs9pcsKd/0nZWW8p3x8KaDWtaF7o0rYIAYwbOMbBhoYttUzmjVO+K5ysUM1tv/KzVCOmrbBF8ZKn9XGs09vY+7juX6x5l420ZpursFt6OZ2wEl3RjymQTpq6QFOnIXxC92HNOKkz2VXu7eERCirdEOUUrAzx/9inwTFXhpMuEiZdVlqIQBdHwIDAQAB",
   "description": "Local-first cross-browser bookmarks",
   "icons": { "16": "assets/icons/icon-16.png", "32": "assets/icons/icon-32.png", "48": "assets/icons/icon-48.png", "128": "assets/icons/icon-128.png" },
