@@ -72,6 +72,22 @@ async function waitForOk(url) {
   throw new Error(`timed out waiting for ${url}: ${last}`);
 }
 
+// The server writes /data as root inside the container, so on Linux the runner
+// user cannot unlink those files directly. Clear the mount with a root
+// container and never let cleanup turn a passed verification into a failure.
+async function removeDataDir(dir) {
+  try {
+    await rm(dir, { recursive: true, force: true });
+  } catch {
+    try {
+      await runChecked('docker', ['run', '--rm', '-v', `${dir}:/data`, image, 'rm', '-rf', '/data']);
+      await rm(dir, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(`unable to remove temp data dir ${dir}: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+}
+
 function bookmarkManifest() {
   return {
     format: 'lumamark-sync',
@@ -151,6 +167,6 @@ if (!(await dockerReady())) {
     process.exitCode = 1;
   } finally {
     if (containerName) await run('docker', ['rm', '-f', containerName]);
-    if (dataDir) await rm(dataDir, { recursive: true, force: true });
+    if (dataDir) await removeDataDir(dataDir);
   }
 }
